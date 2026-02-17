@@ -349,7 +349,13 @@ export default function Home() {
         {/* Topbar */}
         <div className="fl-topbar fl-glass">
           <div className="fl-brand">
-            <div className="fl-logo">FL</div>
+            {/* ✅ SEUL CHANGEMENT : logo au lieu de "FL" */}
+            <img
+              src="/logo.png"
+              alt="MyFinanceLab"
+              className="fl-logo"
+              style={{ objectFit: "contain" }}
+            />
             <div>
               <div className="fl-brand-title">{headerTitle}</div>
               <div className="fl-brand-sub">{headerSub}</div>
