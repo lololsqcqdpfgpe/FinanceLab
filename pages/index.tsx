@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useRouter } from "next/router";
 
 type ApiData = {
   error?: string;
@@ -70,91 +71,226 @@ function fmtPct(x: any) {
   return (x * 100).toFixed(2).replace(".", ",") + "%";
 }
 
-/* ------------------------ Notions cliquables ------------------------ */
+/* ------------------------ Notions ------------------------ */
 const DEFINITIONS: Record<
   string,
-  { title: string; desc: string; how: string; warning?: string }
+  { title: string; desc: string; how: string; warning?: string; short?: string }
 > = {
   revenue: {
     title: "Chiffre d’affaires",
-    desc:
-      "Total des ventes sur la période. Indicateur de taille et de dynamique commerciale.",
-    how:
-      "À analyser avec les marges : CA en hausse mais marges en baisse = pression concurrentielle / coûts.",
+    desc: "Total des ventes sur la période. Indicateur de taille et de dynamique commerciale.",
+    how: "À analyser avec les marges : CA en hausse mais marges en baisse = pression concurrentielle / coûts.",
+    short: "Total des ventes sur la période.",
   },
   ebitda: {
     title: "EBITDA",
-    desc:
-      "Mesure la performance opérationnelle avant intérêts, impôts et amortissements. Très utilisé pour comparer des entreprises.",
-    how:
-      "Souvent comparé à la dette (Dette nette / EBITDA). Plus ce ratio est haut, plus le risque financier augmente.",
+    desc: "Performance opérationnelle avant intérêts, impôts et amortissements.",
+    how: "Souvent comparé à la dette (Dette nette / EBITDA). Plus le ratio est haut, plus le risque financier augmente.",
+    short: "Performance opé (avant I/IS/D&A).",
   },
   operatingIncome: {
     title: "Résultat opérationnel",
-    desc:
-      "Profit de l’activité principale après charges opérationnelles (avant intérêts et impôts).",
-    how:
-      "Permet de mesurer la rentabilité du cœur de métier, indépendamment de la structure financière.",
+    desc: "Profit du cœur de métier (avant intérêts et impôts).",
+    how: "Mesure la rentabilité de l’activité principale indépendamment de la structure financière.",
+    short: "Profit du cœur de métier.",
   },
   netIncome: {
     title: "Résultat net",
-    desc:
-      "Bénéfice final après toutes charges (intérêts, impôts, éléments exceptionnels).",
-    how:
-      "À comparer au chiffre d’affaires (marge nette) et à la stabilité sur plusieurs années.",
+    desc: "Bénéfice final après toutes charges.",
+    how: "À comparer au CA (marge nette) et à la stabilité sur plusieurs années.",
+    short: "Bénéfice final (après tout).",
   },
   totalDebt: {
     title: "Dette totale",
-    desc:
-      "Ensemble des dettes financières de l’entreprise. À analyser avec le cash et l’EBITDA.",
-    how:
-      "Calcule la dette nette = dette - cash, puis Net Debt / EBITDA : <2 sain, 2–4 à surveiller, >4 risqué.",
+    desc: "Ensemble des dettes financières.",
+    how: "Dette nette = dette - cash ; puis Dette nette / EBITDA : <2 sain, 2–4 à surveiller, >4 risqué.",
+    short: "Dettes financières totales.",
   },
   cashAndCashEquivalents: {
     title: "Cash",
-    desc:
-      "Liquidités disponibles (trésorerie + équivalents). Sert à payer les dépenses et rembourser de la dette.",
-    how:
-      "Un cash élevé réduit le risque et augmente la flexibilité financière.",
+    desc: "Liquidités disponibles.",
+    how: "Un cash élevé réduit le risque et augmente la flexibilité financière.",
+    short: "Liquidités disponibles.",
   },
   freeCashFlow: {
     title: "Free Cash Flow",
-    desc:
-      "Cash généré après investissements (Capex). C’est le cash réellement disponible.",
-    how:
-      "FCF positif et régulier = capacité à investir, rembourser la dette, verser des dividendes.",
+    desc: "Cash généré après investissements (Capex).",
+    how: "FCF positif et régulier = capacité à investir, rembourser, distribuer.",
     warning:
-      "FCF négatif sur plusieurs périodes peut signaler une entreprise qui consomme du cash.",
+      "FCF négatif durable peut signaler une entreprise qui consomme du cash.",
+    short: "Cash dispo après capex.",
   },
 };
+
+/* ------------------------ UI ------------------------ */
+function Dot({ tone }: { tone: "green" | "orange" | "red" }) {
+  return <span className={`fl-dot ${tone}`} />;
+}
+
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="fl-card">
+      <div className="fl-card-header">
+        <div className="fl-card-title">{title}</div>
+      </div>
+      <div className="fl-card-body">{children}</div>
+    </section>
+  );
+}
 
 function Field({
   label,
   value,
   sub,
 }: {
-  label: string;
+  label: React.ReactNode;
   value: string;
   sub?: string;
 }) {
   return (
-    <div style={styles.field}>
-      <div style={styles.fieldLabel}>{label}</div>
-      <div style={styles.fieldValue}>{value}</div>
-      {sub ? <div style={styles.fieldSub}>{sub}</div> : null}
+    <div className="fl-field">
+      <div className="fl-field-label">{label}</div>
+      <div className="fl-field-value">{value}</div>
+      {sub ? <div className="fl-field-sub">{sub}</div> : null}
     </div>
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+function NavLink({ href, label }: { href: string; label: string }) {
+  const router = useRouter();
+  const active = router.pathname === href;
   return (
-    <section style={styles.card}>
-      <div style={styles.cardHeader}>
-        <div style={styles.cardTitle}>{title}</div>
-      </div>
-      <div style={styles.cardBody}>{children}</div>
-    </section>
+    <Link href={href} className={`fl-nav-link ${active ? "is-active" : ""}`}>
+      {label}
+    </Link>
   );
+}
+
+/** Tooltip au survol (desktop) + tap (mobile) */
+function InfoTip({
+  k,
+  onOpen,
+}: {
+  k: keyof typeof DEFINITIONS;
+  onOpen: (key: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const d = DEFINITIONS[k];
+
+  return (
+    <span className="fl-info">
+      <span style={{ fontWeight: 950 }}>{d.title}</span>
+      <span
+        className="fl-info-icon"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onTouchStart={() => setOpen((v) => !v)}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onOpen(k);
+        }}
+        role="button"
+        tabIndex={0}
+        aria-label={`Info: ${d.title}`}
+        title="Survol = aperçu · Clic = détail"
+      >
+        i
+      </span>
+
+      {open && (
+        <span className="fl-tooltip">
+          <span className="fl-tooltip-title">{d.title}</span>
+          <span className="fl-tooltip-text">{d.short ?? d.desc}</span>
+          <span className="fl-tooltip-hint">Clic pour le détail</span>
+        </span>
+      )}
+    </span>
+  );
+}
+
+/* ------------------------ Scoring / synthèse ------------------------ */
+type Tone = "green" | "orange" | "red";
+
+function scoreFromData(d: ApiData) {
+  const reasonsGood: string[] = [];
+  const reasonsWatch: string[] = [];
+  const reasonsBad: string[] = [];
+
+  // Dette nette / EBITDA
+  const netDebt =
+    isNumber(d.totalDebt) && isNumber(d.cashAndCashEquivalents)
+      ? d.totalDebt - d.cashAndCashEquivalents
+      : null;
+
+  const ndEbitda =
+    isNumber(netDebt) && isNumber(d.ebitda) && d.ebitda !== 0
+      ? netDebt / d.ebitda
+      : null;
+
+  if (ndEbitda === null) {
+    reasonsWatch.push("Endettement : données insuffisantes pour juger correctement.");
+  } else if (ndEbitda < 2) {
+    reasonsGood.push(`Endettement sain (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
+  } else if (ndEbitda < 4) {
+    reasonsWatch.push(`Endettement à surveiller (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
+  } else {
+    reasonsBad.push(`Endettement élevé (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
+  }
+
+  // FCF
+  if (!isNumber(d.freeCashFlow)) {
+    reasonsWatch.push("Cash : Free Cash Flow indisponible.");
+  } else if (d.freeCashFlow > 0) {
+    reasonsGood.push("Cash : Free Cash Flow positif (entreprise génératrice de cash).");
+  } else {
+    reasonsBad.push("Cash : Free Cash Flow négatif (consommation de cash).");
+  }
+
+  // Rentabilité (marge nette / ROE)
+  if (isNumber(d.netMargin)) {
+    if (d.netMargin >= 0.10) reasonsGood.push(`Rentabilité : marge nette solide (${(d.netMargin * 100).toFixed(1)}%).`);
+    else if (d.netMargin >= 0.03) reasonsWatch.push(`Rentabilité : marge nette moyenne (${(d.netMargin * 100).toFixed(1)}%).`);
+    else reasonsBad.push(`Rentabilité : marge nette faible (${(d.netMargin * 100).toFixed(1)}%).`);
+  } else {
+    reasonsWatch.push("Rentabilité : marge nette indisponible.");
+  }
+
+  if (isNumber(d.roe)) {
+    if (d.roe >= 0.12) reasonsGood.push(`Efficacité : ROE solide (${(d.roe * 100).toFixed(1)}%).`);
+    else if (d.roe >= 0.06) reasonsWatch.push(`Efficacité : ROE correct (${(d.roe * 100).toFixed(1)}%).`);
+    else reasonsBad.push(`Efficacité : ROE faible (${(d.roe * 100).toFixed(1)}%).`);
+  }
+
+  // Valorisation (PER)
+  if (isNumber(d.pe)) {
+    if (d.pe <= 15) reasonsGood.push(`Valorisation : PER raisonnable (${d.pe.toFixed(1)}).`);
+    else if (d.pe <= 30) reasonsWatch.push(`Valorisation : PER élevé (${d.pe.toFixed(1)}), dépend de la croissance.`);
+    else reasonsBad.push(`Valorisation : PER très élevé (${d.pe.toFixed(1)}), risque de survalorisation.`);
+  } else {
+    reasonsWatch.push("Valorisation : PER indisponible.");
+  }
+
+  // score simple
+  const bad = reasonsBad.length;
+  const good = reasonsGood.length;
+
+  let tone: Tone = "orange";
+  let verdict = "Mitigée (à analyser)";
+  if (bad >= 2) {
+    tone = "red";
+    verdict = "À éviter (profil risqué)";
+  } else if (bad === 0 && good >= 3) {
+    tone = "green";
+    verdict = "Intéressante (profil solide)";
+  } else {
+    tone = "orange";
+    verdict = "Mitigée (points à vérifier)";
+  }
+
+  return { tone, verdict, reasonsGood, reasonsWatch, reasonsBad, netDebt, ndEbitda };
 }
 
 export default function Home() {
@@ -165,6 +301,8 @@ export default function Home() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
 
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+
   const canSearch = useMemo(() => symbol.trim().length >= 1, [symbol]);
 
   const fetchData = async () => {
@@ -172,22 +310,23 @@ export default function Home() {
     setLoading(true);
     setData(null);
     setNews([]);
+
     try {
-      const res = await fetch(
-        `/api/financials?symbol=${encodeURIComponent(symbol.trim())}`
-      );
+      const res = await fetch(`/api/financials?symbol=${encodeURIComponent(symbol.trim())}`);
       const json = (await res.json()) as ApiData;
       setData(json);
 
-      const newsRes = await fetch(
-        `/api/news?symbol=${encodeURIComponent(symbol.trim())}`
-      );
+      const newsRes = await fetch(`/api/news?symbol=${encodeURIComponent(symbol.trim())}`);
       const newsJson = await newsRes.json();
       setNews(Array.isArray(newsJson.articles) ? newsJson.articles : []);
     } catch (e) {
       setData({ error: "Erreur réseau (impossible de joindre l’API)." });
     } finally {
       setLoading(false);
+      // scroll doux vers résultats
+      setTimeout(() => {
+        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 80);
     }
   };
 
@@ -198,122 +337,81 @@ export default function Home() {
   const headerTitle = data?.name ? data.name : "FinanceLab";
   const headerSub =
     data?.symbol && !data?.error
-      ? `${data.symbol}${data.exchange ? " · " + data.exchange : ""}${data.sector ? " · " + data.sector : ""
-      }`
-      : "Analyse fondamentale (simple, claire, premium)";
+      ? `${data.symbol}${data.exchange ? " · " + data.exchange : ""}${data.sector ? " · " + data.sector : ""}`
+      : "Analyse fondamentale claire et rapide";
 
-  const netDebt =
-    isNumber(data?.totalDebt) && isNumber(data?.cashAndCashEquivalents)
-      ? (data!.totalDebt as number) - (data!.cashAndCashEquivalents as number)
-      : null;
-
-  const netDebtToEbitda =
-    isNumber(netDebt) && isNumber(data?.ebitda) && (data!.ebitda as number) !== 0
-      ? (netDebt as number) / (data!.ebitda as number)
-      : null;
-
-  const debtRisk =
-    netDebtToEbitda === null
-      ? { label: "Données insuffisantes", emoji: "—" }
-      : netDebtToEbitda < 2
-        ? { label: "Endettement sain (Net Debt/EBITDA < 2)", emoji: "✅" }
-        : netDebtToEbitda < 4
-          ? { label: "Dette à surveiller (2–4)", emoji: "⚠️" }
-          : { label: "Endettement élevé (> 4)", emoji: "❗" };
-
-  const fcfRisk =
-    !isNumber(data?.freeCashFlow)
-      ? { label: "Données insuffisantes", emoji: "—" }
-      : (data!.freeCashFlow as number) > 0
-        ? { label: "Free Cash Flow positif", emoji: "✅" }
-        : { label: "Free Cash Flow négatif", emoji: "⚠️" };
+  const synth = data && !data.error ? scoreFromData(data) : null;
 
   return (
-    <div style={styles.page}>
-      <div style={styles.bgGlow} />
-      <div style={styles.container}>
-        {/* Top bar */}
-        <div style={styles.topbar}>
-          <div style={styles.brand}>
-            <div style={styles.logo}>FL</div>
+    <>
+      <div className="fl-bg-glow" />
+      <div className="fl-container">
+        {/* Topbar */}
+        <div className="fl-topbar fl-glass">
+          <div className="fl-brand">
+            <div className="fl-logo">FL</div>
             <div>
-              <div style={styles.brandTitle}>{headerTitle}</div>
-              <div style={styles.brandSub}>{headerSub}</div>
+              <div className="fl-brand-title">{headerTitle}</div>
+              <div className="fl-brand-sub">{headerSub}</div>
             </div>
           </div>
 
-          {/* ✅ NAVIGATION AJOUTÉE */}
-          <div style={styles.nav}>
-            <Link href="/" style={styles.navLink}>
-              Dashboard
-            </Link>
-            <Link href="/concept" style={styles.navLink}>
-              Concept
-            </Link>
-            <Link href="/community" style={styles.navLink}>
-              Communauté
-            </Link>
+          <div className="fl-nav">
+            <NavLink href="/" label="Dashboard" />
+            <NavLink href="/concept" label="Concept" />
+            <NavLink href="/community" label="Notes" />
           </div>
 
-          <div style={styles.pill}>
-            <span style={styles.pillDot} />
+          <div className="fl-pill">
+            <Dot tone="green" />
             <span>Local</span>
           </div>
         </div>
 
-        {/* Search */}
-        <div style={styles.hero}>
-          <h1 style={styles.h1}>Recherche d’entreprise</h1>
-          <p style={styles.lead}>
-            Tape un <strong>ticker</strong> (ex : <code style={styles.code}>AAPL</code>,{" "}
-            <code style={styles.code}>MSFT</code>, <code style={styles.code}>AIR.PA</code>) puis clique sur
-            Rechercher.
+        {/* Hero */}
+        <div className="fl-hero fl-glass">
+          <h1 className="fl-h1">Recherche d’entreprise</h1>
+          <p className="fl-lead">
+            Tape un <strong>ticker</strong> (ex : <code className="fl-code">AAPL</code>,{" "}
+            <code className="fl-code">MSFT</code>, <code className="fl-code">AIR.PA</code>) puis lance la recherche.
           </p>
 
-          {/* ✅ boutons rapides */}
-          <div style={styles.quickRow}>
-            <Link href="/concept" style={styles.secondaryBtn}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+            <Link href="/concept" className="fl-btn secondary">
               Voir le concept
             </Link>
-            <Link href="/community" style={styles.secondaryBtn}>
-              Aller au forum
+            <Link href="/community" className="fl-btn secondary">
+              Aller aux notes
             </Link>
           </div>
 
-          <div style={styles.searchRow}>
-            <div style={styles.searchBox}>
-              <div style={styles.searchLabel}>Ticker</div>
+          <div style={{ display: "flex", gap: 12, alignItems: "stretch", flexWrap: "wrap" }}>
+            <div className="fl-input-wrap">
+              <div className="fl-input-label">Ticker</div>
               <input
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
                 onKeyDown={onKeyDown}
                 placeholder="Ex: AAPL"
-                style={styles.input}
+                className="fl-input"
               />
-              <div style={styles.searchHint}>Astuce : Entrée pour lancer</div>
+              <div className="fl-input-hint">Astuce : Entrée pour lancer</div>
             </div>
 
-            <button
-              onClick={fetchData}
-              disabled={!canSearch || loading}
-              style={{
-                ...styles.button,
-                ...(loading || !canSearch ? styles.buttonDisabled : {}),
-              }}
-            >
+            <button className="fl-btn" onClick={fetchData} disabled={!canSearch || loading}>
               {loading ? "Chargement…" : "Rechercher"}
             </button>
           </div>
 
-          <div style={styles.chips}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
             {["AAPL", "MSFT", "NVDA", "TSLA", "AIR.PA"].map((s) => (
               <button
                 key={s}
+                className="fl-btn secondary"
                 onClick={() => {
                   setSymbol(s);
                   setTimeout(fetchData, 0);
                 }}
-                style={styles.chip}
               >
                 {s}
               </button>
@@ -321,125 +419,160 @@ export default function Home() {
           </div>
         </div>
 
+        {/* Errors */}
         {data?.error && (
-          <div style={styles.alert}>
-            <div style={styles.alertTitle}>Erreur</div>
-            <div style={styles.alertText}>{data.error}</div>
-            <div style={styles.alertTip}>
-              Essaie un ticker US (ex : AAPL) pour vérifier.
-            </div>
+          <div className="fl-alert" ref={resultsRef}>
+            <div className="fl-alert-title">Erreur</div>
+            <div className="fl-alert-text">{data.error}</div>
+            <div className="fl-alert-tip">Essaie un ticker US (ex : AAPL) pour vérifier.</div>
           </div>
         )}
 
+        {/* Empty */}
         {!data && !loading && (
-          <div style={styles.empty}>
-            <div style={styles.emptyIcon}>🔎</div>
-            <div style={styles.emptyTitle}>Aucune donnée affichée</div>
-            <div style={styles.emptyText}>Saisis un ticker et lance la recherche.</div>
+          <div className="fl-empty" ref={resultsRef}>
+            <div className="fl-empty-title">Aucune donnée affichée</div>
+            <div className="fl-empty-text">Saisis un ticker et lance la recherche.</div>
           </div>
         )}
 
-        {data && !data.error && (
-          <div style={styles.grid}>
+        {/* Loading skeleton */}
+        {loading && (
+          <div className="fl-grid" ref={resultsRef}>
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="fl-card">
+                <div className="fl-card-header">
+                  <div className="fl-card-title">
+                    <div className="fl-skeleton" style={{ height: 18, width: 160 }} />
+                  </div>
+                </div>
+                <div className="fl-card-body">
+                  <div className="fl-fields">
+                    {Array.from({ length: 4 }).map((__, j) => (
+                      <div key={j} className="fl-skeleton" style={{ height: 78, borderRadius: 14 }} />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Results */}
+        {data && !data.error && synth && (
+          <div className="fl-grid" ref={resultsRef}>
+            {/* SYNTHÈSE en premier */}
+            <div className="fl-card" style={{ gridColumn: "span 12" }}>
+              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <div className="fl-card-title">Synthèse (automatique)</div>
+                <div className="fl-pill">
+                  <Dot tone={synth.tone} />
+                  <span style={{ fontWeight: 900 }}>{synth.verdict}</span>
+                </div>
+              </div>
+
+              <div className="fl-card-body" style={{ display: "grid", gap: 12 }}>
+                <div style={{ opacity: 0.85 }}>
+                  Cette synthèse se base sur l’endettement, la génération de cash, la rentabilité et la valorisation (si disponible).
+                </div>
+
+                <div style={{ display: "grid", gap: 10 }}>
+                  {synth.reasonsGood.length > 0 && (
+                    <div className="fl-field" style={{ borderColor: "rgba(34,197,94,0.25)" }}>
+                      <div className="fl-field-label" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <Dot tone="green" /> Points forts
+                      </div>
+                      <div style={{ display: "grid", gap: 6, marginTop: 8, opacity: 0.92 }}>
+                        {synth.reasonsGood.map((r, idx) => (
+                          <div key={idx}>• {r}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {synth.reasonsWatch.length > 0 && (
+                    <div className="fl-field" style={{ borderColor: "rgba(245,158,11,0.25)" }}>
+                      <div className="fl-field-label" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <Dot tone="orange" /> À surveiller
+                      </div>
+                      <div style={{ display: "grid", gap: 6, marginTop: 8, opacity: 0.92 }}>
+                        {synth.reasonsWatch.map((r, idx) => (
+                          <div key={idx}>• {r}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {synth.reasonsBad.length > 0 && (
+                    <div className="fl-field" style={{ borderColor: "rgba(239,68,68,0.25)" }}>
+                      <div className="fl-field-label" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <Dot tone="red" /> Points bloquants
+                      </div>
+                      <div style={{ display: "grid", gap: 6, marginTop: 8, opacity: 0.92 }}>
+                        {synth.reasonsBad.map((r, idx) => (
+                          <div key={idx}>• {r}</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Marché */}
             <Card title="Marché">
-              <div style={styles.fieldsGrid}>
+              <div className="fl-fields">
                 <Field label="Prix" value={fmtNumber(data.price)} sub="Dernier cours" />
                 <Field label="Capitalisation" value={fmtMoneyCompact(data.marketCap)} sub="Market Cap" />
                 <Field label="Volume" value={fmtNumber(data.volume)} sub="Volume du jour" />
-                <Field
-                  label="Jour"
-                  value={`${fmtNumber(data.dayLow)} → ${fmtNumber(data.dayHigh)}`}
-                  sub="Plus bas → Plus haut"
-                />
-                <Field
-                  label="52 semaines"
-                  value={`${fmtNumber(data.yearLow)} → ${fmtNumber(data.yearHigh)}`}
-                  sub="Plus bas → Plus haut"
-                />
+                <Field label="Jour" value={`${fmtNumber(data.dayLow)} → ${fmtNumber(data.dayHigh)}`} sub="Plus bas → Plus haut" />
+                <Field label="52 semaines" value={`${fmtNumber(data.yearLow)} → ${fmtNumber(data.yearHigh)}`} sub="Plus bas → Plus haut" />
               </div>
             </Card>
 
+            {/* Compte de résultat */}
             <Card title="Compte de résultat">
-              <div style={styles.fieldsGrid}>
+              <div className="fl-fields">
                 <Field label="Période" value={data.period ?? "—"} sub="Dernière période connue" />
-
-                <div onClick={() => setOpenKey("revenue")} style={{ cursor: "pointer" }}>
-                  <Field label="Chiffre d’affaires ℹ️" value={fmtMoneyCompact(data.revenue)} />
-                </div>
-
-                <div onClick={() => setOpenKey("ebitda")} style={{ cursor: "pointer" }}>
-                  <Field label="EBITDA ℹ️" value={fmtMoneyCompact(data.ebitda)} />
-                </div>
-
-                <div onClick={() => setOpenKey("operatingIncome")} style={{ cursor: "pointer" }}>
-                  <Field label="Résultat opé ℹ️" value={fmtMoneyCompact(data.operatingIncome)} />
-                </div>
-
-                <div onClick={() => setOpenKey("netIncome")} style={{ cursor: "pointer" }}>
-                  <Field label="Résultat net ℹ️" value={fmtMoneyCompact(data.netIncome)} />
-                </div>
+                <Field label={<InfoTip k="revenue" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.revenue)} />
+                <Field label={<InfoTip k="ebitda" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.ebitda)} />
+                <Field label={<InfoTip k="operatingIncome" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.operatingIncome)} />
+                <Field label={<InfoTip k="netIncome" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.netIncome)} />
               </div>
             </Card>
 
+            {/* Bilan */}
             <Card title="Bilan">
-              <div style={styles.fieldsGrid}>
-                <div onClick={() => setOpenKey("totalDebt")} style={{ cursor: "pointer" }}>
-                  <Field label="Dette totale ℹ️" value={fmtMoneyCompact(data.totalDebt)} />
-                </div>
-
-                <div onClick={() => setOpenKey("cashAndCashEquivalents")} style={{ cursor: "pointer" }}>
-                  <Field label="Cash ℹ️" value={fmtMoneyCompact(data.cashAndCashEquivalents)} />
-                </div>
-
+              <div className="fl-fields">
+                <Field label={<InfoTip k="totalDebt" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.totalDebt)} />
+                <Field label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.cashAndCashEquivalents)} />
                 <Field label="Capitaux propres" value={fmtMoneyCompact(data.totalEquity)} />
+                <Field label="Dette nette" value={fmtMoneyCompact(synth.netDebt)} sub="Dette - Cash" />
               </div>
             </Card>
 
+            {/* Cash flow */}
             <Card title="Cash flow">
-              <div style={styles.fieldsGrid}>
+              <div className="fl-fields">
                 <Field label="Operating CF" value={fmtMoneyCompact(data.operatingCashFlow)} sub="Flux opérationnel" />
                 <Field label="Capex" value={fmtMoneyCompact(data.capitalExpenditure)} sub="Investissements" />
-                <div onClick={() => setOpenKey("freeCashFlow")} style={{ cursor: "pointer" }}>
-                  <Field label="Free Cash Flow ℹ️" value={fmtMoneyCompact(data.freeCashFlow)} sub="OCF - Capex" />
-                </div>
+                <Field label={<InfoTip k="freeCashFlow" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.freeCashFlow)} sub="OCF - Capex" />
+                <Field
+                  label="Dette nette / EBITDA"
+                  value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
+                  sub="Niveau de risque"
+                />
               </div>
             </Card>
 
-            <Card title="Diagnostic (automatique)">
-              <div style={{ display: "grid", gap: 12 }}>
-                <div style={styles.diagnosticItem}>
-                  <div style={styles.diagnosticTitle}>Risque de dette</div>
-                  <div style={styles.diagnosticText}>
-                    {debtRisk.emoji} {debtRisk.label}
-                    {netDebtToEbitda !== null ? ` · Ratio: ${netDebtToEbitda.toFixed(2)}` : ""}
-                  </div>
-                </div>
-
-                <div style={styles.diagnosticItem}>
-                  <div style={styles.diagnosticTitle}>Génération de cash</div>
-                  <div style={styles.diagnosticText}>
-                    {fcfRisk.emoji} {fcfRisk.label}
-                  </div>
-                </div>
-
-                {netDebt !== null && (
-                  <div style={styles.diagnosticItem}>
-                    <div style={styles.diagnosticTitle}>Dette nette</div>
-                    <div style={styles.diagnosticText}>{fmtMoneyCompact(netDebt)}</div>
-                  </div>
-                )}
-              </div>
-            </Card>
-
+            {/* Actus */}
             <Card title="Actualités récentes">
               <div style={{ display: "grid", gap: 12 }}>
-                {news.length === 0 && (
-                  <div style={{ opacity: 0.65 }}>Aucune actualité trouvée.</div>
-                )}
+                {news.length === 0 && <div style={{ opacity: 0.65 }}>Aucune actualité trouvée.</div>}
                 {news.map((n, i) => (
-                  <a key={i} href={n.url} target="_blank" rel="noreferrer" style={styles.newsItem}>
-                    <div style={styles.newsTitle}>{n.title}</div>
-                    <div style={styles.newsMeta}>
+                  <a key={i} href={n.url} target="_blank" rel="noreferrer" className="fl-news">
+                    <div className="fl-news-title">{n.title}</div>
+                    <div className="fl-news-meta">
                       {n.site} · {new Date(n.date).toLocaleDateString("fr-FR")}
                     </div>
                   </a>
@@ -447,6 +580,7 @@ export default function Home() {
               </div>
             </Card>
 
+            {/* Ratios */}
             {(data.pb != null ||
               data.ps != null ||
               data.netMargin != null ||
@@ -455,8 +589,8 @@ export default function Home() {
               data.roe != null ||
               data.roa != null) && (
                 <Card title="Ratios (si disponibles)">
-                  <div style={styles.fieldsGrid}>
-                    <Field label="PER (P/E)" value={data.pe != null ? String(data.pe) : "—"} sub="Valorisation" />
+                  <div className="fl-fields">
+                    <Field label="PER (P/E)" value={data.pe != null ? String(data.pe.toFixed?.(2) ?? data.pe) : "—"} sub="Valorisation" />
                     <Field label="EPS" value={data.eps != null ? String(data.eps) : "—"} sub="Bénéfice par action" />
                     <Field label="P/B" value={data.pb != null ? String(data.pb) : "—"} />
                     <Field label="P/S" value={data.ps != null ? String(data.ps) : "—"} />
@@ -467,33 +601,36 @@ export default function Home() {
                 </Card>
               )}
 
+            {/* Profil */}
             <Card title="Profil">
               <div style={{ display: "grid", gap: 12 }}>
-                <div style={styles.profileLine}>
-                  <div style={styles.profileKey}>Nom</div>
-                  <div style={styles.profileVal}>{data.name ?? "—"}</div>
+                <div className="fl-field" style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+                  <div className="fl-field-label">Nom</div>
+                  <div style={{ fontWeight: 900 }}>{data.name ?? "—"}</div>
                 </div>
-                <div style={styles.profileLine}>
-                  <div style={styles.profileKey}>Ticker</div>
-                  <div style={styles.profileVal}>{data.symbol ?? "—"}</div>
+                <div className="fl-field" style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+                  <div className="fl-field-label">Ticker</div>
+                  <div style={{ fontWeight: 900 }}>{data.symbol ?? "—"}</div>
                 </div>
-                <div style={styles.profileLine}>
-                  <div style={styles.profileKey}>Secteur</div>
-                  <div style={styles.profileVal}>{data.sector ?? "—"}</div>
+                <div className="fl-field" style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+                  <div className="fl-field-label">Secteur</div>
+                  <div style={{ fontWeight: 900 }}>{data.sector ?? "—"}</div>
                 </div>
-                <div style={styles.profileLine}>
-                  <div style={styles.profileKey}>Industrie</div>
-                  <div style={styles.profileVal}>{data.industry ?? "—"}</div>
+                <div className="fl-field" style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+                  <div className="fl-field-label">Industrie</div>
+                  <div style={{ fontWeight: 900 }}>{data.industry ?? "—"}</div>
                 </div>
-                <div style={styles.profileLine}>
-                  <div style={styles.profileKey}>Pays</div>
-                  <div style={styles.profileVal}>{data.country ?? "—"}</div>
+                <div className="fl-field" style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10 }}>
+                  <div className="fl-field-label">Pays</div>
+                  <div style={{ fontWeight: 900 }}>{data.country ?? "—"}</div>
                 </div>
 
                 {data.description && (
-                  <div style={styles.descBox}>
-                    <div style={styles.descTitle}>Description</div>
-                    <div style={styles.descText}>{data.description}</div>
+                  <div className="fl-field">
+                    <div className="fl-field-label" style={{ fontWeight: 950, opacity: 0.85 }}>
+                      Description
+                    </div>
+                    <div style={{ opacity: 0.88, lineHeight: 1.55 }}>{data.description}</div>
                   </div>
                 )}
               </div>
@@ -501,189 +638,30 @@ export default function Home() {
           </div>
         )}
 
-        <div style={styles.footer}>
-          <div style={styles.footerLeft}>
-            <span style={styles.footerBadge}>FinanceLab</span>
-            <span style={{ opacity: 0.75 }}>· Prototype premium (local)</span>
-          </div>
-          <div style={{ opacity: 0.6 }}>Prochaine étape : forum + page concept</div>
+        {/* Footer (sans badge) */}
+        <div className="fl-footer">
+          <div>FinanceLab · Dashboard</div>
+          <div style={{ opacity: 0.7 }}>Notes : pense-bête perso (24h)</div>
         </div>
 
+        {/* Modal définitions */}
         {openKey && DEFINITIONS[openKey] && (
-          <div style={modalStyles.overlay} onClick={() => setOpenKey(null)}>
-            <div style={modalStyles.modal} onClick={(e) => e.stopPropagation()}>
-              <div style={modalStyles.title}>{DEFINITIONS[openKey].title}</div>
-              <div style={modalStyles.desc}>{DEFINITIONS[openKey].desc}</div>
-              <div style={modalStyles.howTitle}>Comment l’interpréter</div>
-              <div style={modalStyles.how}>{DEFINITIONS[openKey].how}</div>
+          <div className="fl-overlay" onClick={() => setOpenKey(null)}>
+            <div className="fl-modal" onClick={(e) => e.stopPropagation()}>
+              <div className="fl-modal-title">{DEFINITIONS[openKey].title}</div>
+              <div className="fl-modal-desc">{DEFINITIONS[openKey].desc}</div>
+              <div className="fl-modal-how-title">Comment l’interpréter</div>
+              <div className="fl-modal-how">{DEFINITIONS[openKey].how}</div>
               {DEFINITIONS[openKey].warning && (
-                <div style={modalStyles.warn}>{DEFINITIONS[openKey].warning}</div>
+                <div className="fl-modal-warn">{DEFINITIONS[openKey].warning}</div>
               )}
-              <button style={modalStyles.btn} onClick={() => setOpenKey(null)}>
+              <button className="fl-modal-btn" onClick={() => setOpenKey(null)}>
                 Fermer
               </button>
             </div>
           </div>
         )}
       </div>
-    </div>
+    </>
   );
 }
-
-const modalStyles: Record<string, React.CSSProperties> = {
-  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999, padding: 16 },
-  modal: { width: "100%", maxWidth: 560, borderRadius: 18, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(17,24,39,0.95)", backdropFilter: "blur(10px)", padding: 18 },
-  title: { fontWeight: 900, fontSize: 18, marginBottom: 10 },
-  desc: { opacity: 0.9, lineHeight: 1.6, marginBottom: 12 },
-  howTitle: { fontWeight: 900, marginBottom: 6 },
-  how: { opacity: 0.85, lineHeight: 1.6 },
-  warn: { marginTop: 12, padding: 12, borderRadius: 14, border: "1px solid rgba(251,191,36,0.35)", background: "rgba(251,191,36,0.08)", opacity: 0.95 },
-  btn: { marginTop: 14, padding: "10px 12px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.08)", color: "#EAF0FF", cursor: "pointer", fontWeight: 800, width: "100%" },
-};
-
-const styles: Record<string, React.CSSProperties> = {
-  page: { minHeight: "100vh", background: "#0B1020", color: "#EAF0FF", position: "relative", overflow: "hidden" },
-  bgGlow: {
-    position: "absolute",
-    inset: -200,
-    background:
-      "radial-gradient(800px 400px at 20% 10%, rgba(79,70,229,0.35), transparent 60%), radial-gradient(700px 400px at 80% 20%, rgba(16,185,129,0.22), transparent 60%), radial-gradient(900px 500px at 50% 100%, rgba(56,189,248,0.18), transparent 60%)",
-    pointerEvents: "none",
-  },
-  container: { position: "relative", maxWidth: 1100, margin: "0 auto", padding: "24px 18px 40px" },
-
-  topbar: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 16,
-    padding: "14px 14px",
-    background: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 16,
-    backdropFilter: "blur(10px)",
-  },
-  brand: { display: "flex", alignItems: "center", gap: 12 },
-  logo: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    display: "grid",
-    placeItems: "center",
-    fontWeight: 800,
-    letterSpacing: 0.5,
-    background: "linear-gradient(135deg, rgba(99,102,241,0.9), rgba(16,185,129,0.7))",
-    color: "#07101F",
-  },
-  brandTitle: { fontWeight: 800, fontSize: 16, lineHeight: 1.1 },
-  brandSub: { opacity: 0.75, fontSize: 13, marginTop: 2 },
-
-  nav: { display: "flex", gap: 10, flexWrap: "wrap" },
-  navLink: {
-    padding: "8px 10px",
-    borderRadius: 999,
-    border: "1px solid rgba(255,255,255,0.10)",
-    background: "rgba(255,255,255,0.06)",
-    color: "#EAF0FF",
-    textDecoration: "none",
-    fontSize: 12,
-    fontWeight: 800,
-  },
-
-  pill: {
-    display: "inline-flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "8px 12px",
-    borderRadius: 999,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    fontSize: 12,
-  },
-  pillDot: { width: 8, height: 8, borderRadius: 999, background: "#22c55e", boxShadow: "0 0 0 6px rgba(34,197,94,0.12)" },
-
-  hero: {
-    marginTop: 18,
-    padding: 18,
-    borderRadius: 18,
-    border: "1px solid rgba(255,255,255,0.08)",
-    background: "rgba(255,255,255,0.04)",
-    backdropFilter: "blur(10px)",
-  },
-  h1: { margin: 0, fontSize: 28, letterSpacing: -0.4 },
-  lead: { marginTop: 10, marginBottom: 12, opacity: 0.85, lineHeight: 1.5 },
-  code: { padding: "2px 8px", borderRadius: 999, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.10)", fontSize: 13 },
-
-  quickRow: { display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 },
-  secondaryBtn: {
-    padding: "10px 12px",
-    borderRadius: 14,
-    textDecoration: "none",
-    color: "#EAF0FF",
-    fontWeight: 900,
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.10)",
-    fontSize: 13,
-  },
-
-  searchRow: { display: "flex", gap: 12, alignItems: "stretch", flexWrap: "wrap" },
-  searchBox: { flex: "1 1 360px", minWidth: 260, padding: 12, borderRadius: 16, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(0,0,0,0.20)" },
-  searchLabel: { fontSize: 12, opacity: 0.7, marginBottom: 8 },
-  input: { width: "100%", padding: "12px 12px", fontSize: 16, borderRadius: 12, outline: "none", border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.06)", color: "#EAF0FF" },
-  searchHint: { fontSize: 12, opacity: 0.6, marginTop: 8 },
-
-  button: { padding: "14px 16px", borderRadius: 14, border: "1px solid rgba(255,255,255,0.12)", background: "linear-gradient(135deg, rgba(99,102,241,0.85), rgba(56,189,248,0.55))", color: "#07101F", fontWeight: 800, cursor: "pointer", minWidth: 150 },
-  buttonDisabled: { opacity: 0.55, cursor: "not-allowed" },
-
-  chips: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 },
-  chip: { padding: "8px 12px", borderRadius: 999, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(255,255,255,0.06)", color: "#EAF0FF", cursor: "pointer", fontSize: 12 },
-
-  alert: { marginTop: 16, padding: 16, borderRadius: 16, border: "1px solid rgba(239,68,68,0.35)", background: "rgba(239,68,68,0.08)" },
-  alertTitle: { fontWeight: 800, marginBottom: 6 },
-  alertText: { opacity: 0.9 },
-  alertTip: { marginTop: 8, opacity: 0.75, fontSize: 13 },
-
-  empty: { marginTop: 16, padding: 22, borderRadius: 18, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.03)", textAlign: "center" },
-  emptyIcon: { fontSize: 26, marginBottom: 8 },
-  emptyTitle: { fontWeight: 800, fontSize: 16 },
-  emptyText: { opacity: 0.7, marginTop: 6 },
-
-  grid: { marginTop: 16, display: "grid", gridTemplateColumns: "repeat(12, 1fr)", gap: 14 },
-  card: { gridColumn: "span 6", borderRadius: 18, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.04)", backdropFilter: "blur(10px)", overflow: "hidden" },
-  cardHeader: { padding: "12px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)" },
-  cardTitle: { fontWeight: 900, letterSpacing: -0.2 },
-  cardBody: { padding: 14 },
-
-  fieldsGrid: { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12 },
-  field: { padding: 12, borderRadius: 14, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(0,0,0,0.18)" },
-  fieldLabel: { fontSize: 12, opacity: 0.7, marginBottom: 6 },
-  fieldValue: { fontSize: 18, fontWeight: 900, letterSpacing: -0.2 },
-  fieldSub: { marginTop: 4, fontSize: 12, opacity: 0.6 },
-
-  profileLine: { display: "grid", gridTemplateColumns: "140px 1fr", gap: 10, padding: 10, borderRadius: 14, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(0,0,0,0.18)" },
-  profileKey: { opacity: 0.7, fontSize: 12 },
-  profileVal: { fontWeight: 700 },
-
-  descBox: { padding: 12, borderRadius: 14, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(0,0,0,0.18)" },
-  descTitle: { fontWeight: 900, marginBottom: 6 },
-  descText: { opacity: 0.85, lineHeight: 1.5 },
-
-  footer: { marginTop: 18, paddingTop: 16, borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", fontSize: 12 },
-  footerLeft: { display: "flex", alignItems: "center", gap: 10 },
-  footerBadge: { padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,0.10)", background: "rgba(255,255,255,0.06)", fontWeight: 800 },
-
-  diagnosticItem: { padding: 12, borderRadius: 14, border: "1px solid rgba(255,255,255,0.08)", background: "rgba(0,0,0,0.18)" },
-  diagnosticTitle: { fontSize: 12, opacity: 0.7, marginBottom: 6 },
-  diagnosticText: { fontWeight: 900 },
-
-  newsItem: {
-    padding: 12,
-    borderRadius: 14,
-    border: "1px solid rgba(255,255,255,0.08)",
-    background: "rgba(0,0,0,0.18)",
-    textDecoration: "none",
-    color: "#EAF0FF",
-  },
-  newsTitle: { fontWeight: 900, lineHeight: 1.3 },
-  newsMeta: { opacity: 0.65, fontSize: 12, marginTop: 6 },
-};
