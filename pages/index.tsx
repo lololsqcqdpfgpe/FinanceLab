@@ -64,6 +64,8 @@ type NewsItem = { title: string; url: string; site: string; date: string };
 
 type PricePoint = { date: string; close: number; volume?: number };
 
+type Tone = "green" | "orange" | "red";
+
 function isNumber(x: any): x is number {
   return typeof x === "number" && Number.isFinite(x);
 }
@@ -138,7 +140,7 @@ const DEFINITIONS: Record<
 };
 
 /* ------------------------ UI ------------------------ */
-function Dot({ tone }: { tone: "green" | "orange" | "red" }) {
+function Dot({ tone }: { tone: Tone }) {
   return <span className={`fl-dot ${tone}`} />;
 }
 
@@ -153,15 +155,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
-function Field({
-  label,
-  value,
-  sub,
-}: {
-  label: React.ReactNode;
-  value: string;
-  sub?: string;
-}) {
+function Field({ label, value, sub }: { label: React.ReactNode; value: string; sub?: string }) {
   return (
     <div className="fl-field">
       <div className="fl-field-label">{label}</div>
@@ -181,14 +175,7 @@ function NavLink({ href, label }: { href: string; label: string }) {
   );
 }
 
-/** Tooltip au survol (desktop) + tap (mobile) */
-function InfoTip({
-  k,
-  onOpen,
-}: {
-  k: keyof typeof DEFINITIONS;
-  onOpen: (key: string) => void;
-}) {
+function InfoTip({ k, onOpen }: { k: keyof typeof DEFINITIONS; onOpen: (key: string) => void }) {
   const [open, setOpen] = useState(false);
   const d = DEFINITIONS[k];
 
@@ -226,9 +213,7 @@ function InfoTip({
   );
 }
 
-/* ------------------------ Scoring / synthèse ------------------------ */
-type Tone = "green" | "orange" | "red";
-
+/* ------------------------ Scoring ------------------------ */
 function scoreFromData(d: ApiData) {
   const reasonsGood: string[] = [];
   const reasonsWatch: string[] = [];
@@ -292,9 +277,8 @@ function scoreFromData(d: ApiData) {
   return { tone, verdict, reasonsGood, reasonsWatch, reasonsBad, netDebt, ndEbitda };
 }
 
-/* ------------------------ Helpers graphique ------------------------ */
+/* ------------------------ Graph helpers ------------------------ */
 function fmtPriceEuroLike(x: number) {
-  // format simple, pas de devise affichée (ça reste clean)
   return x.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
 }
 
@@ -303,8 +287,15 @@ function calcPerf(points: PricePoint[]) {
   const first = points[0]?.close;
   const last = points[points.length - 1]?.close;
   if (!isNumber(first) || !isNumber(last) || first === 0) return null;
-  const pct = (last - first) / first;
-  return pct;
+  return (last - first) / first;
+}
+
+function extractErrMessage(payload: any): string | null {
+  if (!payload) return null;
+  if (typeof payload === "string") return payload;
+  if (typeof payload?.error === "string") return payload.error;
+  if (typeof payload?.message === "string") return payload.message;
+  return null;
 }
 
 export default function Home() {
@@ -318,9 +309,9 @@ export default function Home() {
   const [range, setRange] = useState<"1m" | "3m" | "6m" | "1y">("6m");
   const [history, setHistory] = useState<PricePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
-
   const canSearch = useMemo(() => symbol.trim().length >= 1, [symbol]);
 
   const fetchData = async () => {
@@ -330,25 +321,38 @@ export default function Home() {
     setData(null);
     setNews([]);
     setHistory([]);
+    setHistoryError(null);
     setHistoryLoading(true);
 
     try {
-      const res = await fetch(`/api/financials?symbol=${encodeURIComponent(symbol.trim())}`);
+      const sym = symbol.trim();
+
+      // 1) Financials
+      const res = await fetch(`/api/financials?symbol=${encodeURIComponent(sym)}`);
       const json = (await res.json()) as ApiData;
       setData(json);
 
-      const newsRes = await fetch(`/api/news?symbol=${encodeURIComponent(symbol.trim())}`);
+      // si déjà erreur côté API financials, on peut quand même tenter news/history,
+      // mais on garde ton UX simple : on laisse quand même faire.
+      const newsRes = await fetch(`/api/news?symbol=${encodeURIComponent(sym)}`);
       const newsJson = await newsRes.json();
       setNews(Array.isArray(newsJson.articles) ? newsJson.articles : []);
 
-      const histRes = await fetch(
-        `/api/history?symbol=${encodeURIComponent(symbol.trim())}&range=${encodeURIComponent(range)}`
-      );
+      // 2) History (graph)
+      const histRes = await fetch(`/api/history?symbol=${encodeURIComponent(sym)}&range=${encodeURIComponent(range)}`);
       const histJson = await histRes.json();
-      setHistory(Array.isArray(histJson.points) ? histJson.points : []);
-    } catch (e) {
+
+      if (!histRes.ok) {
+        setHistory([]);
+        setHistoryError(extractErrMessage(histJson) ?? "Impossible de charger l’historique.");
+      } else {
+        setHistory(Array.isArray(histJson.points) ? histJson.points : []);
+        setHistoryError(null);
+      }
+    } catch {
       setData({ error: "Erreur réseau (impossible de joindre l’API)." });
       setHistory([]);
+      setHistoryError("Erreur réseau sur l’historique.");
     } finally {
       setLoading(false);
       setHistoryLoading(false);
@@ -378,19 +382,19 @@ export default function Home() {
   const chartData = useMemo(() => {
     const labels = history.map((p) => p.date);
     const values = history.map((p) => p.close);
-
     return {
       labels,
       datasets: [
         {
           label: "Prix",
           data: values,
-          borderColor: "rgba(120,170,255,1)",
-          backgroundColor: "rgba(120,170,255,0.14)",
           fill: true,
           tension: 0.35,
           pointRadius: 0,
           borderWidth: 2,
+          // (tu peux garder tes couleurs si tu veux, c’est déjà propre)
+          borderColor: "rgba(120,170,255,1)",
+          backgroundColor: "rgba(120,170,255,0.14)",
         },
       ],
     };
@@ -416,18 +420,14 @@ export default function Home() {
           callbacks: {
             title: (items: any) => {
               const idx = items?.[0]?.dataIndex ?? 0;
-              const d = history[idx]?.date ?? "";
-              return d;
+              return history[idx]?.date ?? "";
             },
             label: (item: any) => `Prix : ${fmtPriceEuroLike(item.parsed.y)}`,
           },
         },
       },
       scales: {
-        x: {
-          display: false,
-          grid: { display: false },
-        },
+        x: { display: false, grid: { display: false } },
         y: {
           display: true,
           grid: { color: "rgba(255,255,255,0.06)" },
@@ -442,14 +442,23 @@ export default function Home() {
 
   const onChangeRange = async (r: "1m" | "3m" | "6m" | "1y") => {
     setRange(r);
-    if (!data?.symbol || data?.error) return;
+    if (!symbol.trim()) return;
+
+    // recharge graph sans tout recharger
     setHistoryLoading(true);
+    setHistoryError(null);
+
     try {
-      const histRes = await fetch(
-        `/api/history?symbol=${encodeURIComponent(data.symbol)}&range=${encodeURIComponent(r)}`
-      );
+      const histRes = await fetch(`/api/history?symbol=${encodeURIComponent(symbol.trim())}&range=${encodeURIComponent(r)}`);
       const histJson = await histRes.json();
-      setHistory(Array.isArray(histJson.points) ? histJson.points : []);
+
+      if (!histRes.ok) {
+        setHistory([]);
+        setHistoryError(extractErrMessage(histJson) ?? "Impossible de charger l’historique.");
+      } else {
+        setHistory(Array.isArray(histJson.points) ? histJson.points : []);
+        setHistoryError(null);
+      }
     } finally {
       setHistoryLoading(false);
     }
@@ -543,7 +552,7 @@ export default function Home() {
           <div className="fl-alert" ref={resultsRef}>
             <div className="fl-alert-title">Erreur</div>
             <div className="fl-alert-text">{data.error}</div>
-            <div className="fl-alert-tip">Essaie un ticker US (ex : AAPL) pour vérifier.</div>
+            <div className="fl-alert-tip">Si tu vois “429 / quota”, c’est juste tes crédits API.</div>
           </div>
         )}
 
@@ -582,15 +591,7 @@ export default function Home() {
           <div className="fl-grid" ref={resultsRef}>
             {/* SYNTHÈSE */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div
-                className="fl-card-header"
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
+              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <div className="fl-card-title">Synthèse (automatique)</div>
                 <div className="fl-pill">
                   <Dot tone={synth.tone} />
@@ -646,12 +647,9 @@ export default function Home() {
               </div>
             </div>
 
-            {/* GRAPH PREMIUM */}
+            {/* GRAPH */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div
-                className="fl-card-header"
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
-              >
+              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <div className="fl-card-title">Prix (graphique)</div>
 
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -662,16 +660,16 @@ export default function Home() {
                     </span>
                   </div>
 
-                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("1m")} disabled={historyLoading}>
+                  <button className="fl-btn secondary" onClick={() => onChangeRange("1m")} disabled={historyLoading}>
                     1M
                   </button>
-                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("3m")} disabled={historyLoading}>
+                  <button className="fl-btn secondary" onClick={() => onChangeRange("3m")} disabled={historyLoading}>
                     3M
                   </button>
-                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("6m")} disabled={historyLoading}>
+                  <button className="fl-btn secondary" onClick={() => onChangeRange("6m")} disabled={historyLoading}>
                     6M
                   </button>
-                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("1y")} disabled={historyLoading}>
+                  <button className="fl-btn secondary" onClick={() => onChangeRange("1y")} disabled={historyLoading}>
                     1Y
                   </button>
                 </div>
@@ -681,6 +679,11 @@ export default function Home() {
                 <div style={{ height: 280 }}>
                   {historyLoading ? (
                     <div className="fl-skeleton" style={{ height: 280, borderRadius: 16 }} />
+                  ) : historyError ? (
+                    <div style={{ opacity: 0.8 }}>
+                      <div style={{ fontWeight: 900, marginBottom: 6 }}>Graph indisponible</div>
+                      <div style={{ opacity: 0.8 }}>{historyError}</div>
+                    </div>
                   ) : history.length === 0 ? (
                     <div style={{ opacity: 0.7 }}>Aucune donnée disponible pour le graphique.</div>
                   ) : (
@@ -719,10 +722,7 @@ export default function Home() {
             <Card title="Bilan">
               <div className="fl-fields">
                 <Field label={<InfoTip k="totalDebt" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.totalDebt)} />
-                <Field
-                  label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />}
-                  value={fmtMoneyCompact(data.cashAndCashEquivalents)}
-                />
+                <Field label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.cashAndCashEquivalents)} />
                 <Field label="Capitaux propres" value={fmtMoneyCompact(data.totalEquity)} />
                 <Field label="Dette nette" value={fmtMoneyCompact(synth.netDebt)} sub="Dette - Cash" />
               </div>

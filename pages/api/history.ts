@@ -16,7 +16,6 @@ const RANGE_TO_DAYS: Record<Range, number> = {
 function normalizeSymbol(input: string) {
     return input.trim().toUpperCase();
 }
-
 function normalizeRange(input: string): Range {
     const r = input.trim().toLowerCase() as Range;
     return (["1m", "3m", "6m", "1y"] as const).includes(r) ? r : "6m";
@@ -59,8 +58,8 @@ export default async function handler(
             });
         }
 
-        const j = await r.json();
-        const hist = Array.isArray(j?.historical) ? j.historical : [];
+        const j: any = await r.json();
+        const hist: any[] = Array.isArray(j?.historical) ? j.historical : [];
 
         const points: PricePoint[] = hist
             .slice()
