@@ -2,6 +2,20 @@ import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Tooltip,
+  Filler,
+  TimeScale,
+} from "chart.js";
+import { Line } from "react-chartjs-2";
+
+ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler, TimeScale);
+
 type ApiData = {
   error?: string;
 
@@ -47,6 +61,8 @@ type ApiData = {
 };
 
 type NewsItem = { title: string; url: string; site: string; date: string };
+
+type PricePoint = { date: string; close: number; volume?: number };
 
 function isNumber(x: any): x is number {
   return typeof x === "number" && Number.isFinite(x);
@@ -116,8 +132,7 @@ const DEFINITIONS: Record<
     title: "Free Cash Flow",
     desc: "Cash généré après investissements (Capex).",
     how: "FCF positif et régulier = capacité à investir, rembourser, distribuer.",
-    warning:
-      "FCF négatif durable peut signaler une entreprise qui consomme du cash.",
+    warning: "FCF négatif durable peut signaler une entreprise qui consomme du cash.",
     short: "Cash dispo après capex.",
   },
 };
@@ -219,37 +234,23 @@ function scoreFromData(d: ApiData) {
   const reasonsWatch: string[] = [];
   const reasonsBad: string[] = [];
 
-  // Dette nette / EBITDA
   const netDebt =
     isNumber(d.totalDebt) && isNumber(d.cashAndCashEquivalents)
       ? d.totalDebt - d.cashAndCashEquivalents
       : null;
 
   const ndEbitda =
-    isNumber(netDebt) && isNumber(d.ebitda) && d.ebitda !== 0
-      ? netDebt / d.ebitda
-      : null;
+    isNumber(netDebt) && isNumber(d.ebitda) && d.ebitda !== 0 ? netDebt / d.ebitda : null;
 
-  if (ndEbitda === null) {
-    reasonsWatch.push("Endettement : données insuffisantes pour juger correctement.");
-  } else if (ndEbitda < 2) {
-    reasonsGood.push(`Endettement sain (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
-  } else if (ndEbitda < 4) {
-    reasonsWatch.push(`Endettement à surveiller (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
-  } else {
-    reasonsBad.push(`Endettement élevé (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
-  }
+  if (ndEbitda === null) reasonsWatch.push("Endettement : données insuffisantes pour juger correctement.");
+  else if (ndEbitda < 2) reasonsGood.push(`Endettement sain (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
+  else if (ndEbitda < 4) reasonsWatch.push(`Endettement à surveiller (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
+  else reasonsBad.push(`Endettement élevé (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
 
-  // FCF
-  if (!isNumber(d.freeCashFlow)) {
-    reasonsWatch.push("Cash : Free Cash Flow indisponible.");
-  } else if (d.freeCashFlow > 0) {
-    reasonsGood.push("Cash : Free Cash Flow positif (entreprise génératrice de cash).");
-  } else {
-    reasonsBad.push("Cash : Free Cash Flow négatif (consommation de cash).");
-  }
+  if (!isNumber(d.freeCashFlow)) reasonsWatch.push("Cash : Free Cash Flow indisponible.");
+  else if (d.freeCashFlow > 0) reasonsGood.push("Cash : Free Cash Flow positif (entreprise génératrice de cash).");
+  else reasonsBad.push("Cash : Free Cash Flow négatif (consommation de cash).");
 
-  // Rentabilité (marge nette / ROE)
   if (isNumber(d.netMargin)) {
     if (d.netMargin >= 0.10) reasonsGood.push(`Rentabilité : marge nette solide (${(d.netMargin * 100).toFixed(1)}%).`);
     else if (d.netMargin >= 0.03) reasonsWatch.push(`Rentabilité : marge nette moyenne (${(d.netMargin * 100).toFixed(1)}%).`);
@@ -264,7 +265,6 @@ function scoreFromData(d: ApiData) {
     else reasonsBad.push(`Efficacité : ROE faible (${(d.roe * 100).toFixed(1)}%).`);
   }
 
-  // Valorisation (PER)
   if (isNumber(d.pe)) {
     if (d.pe <= 15) reasonsGood.push(`Valorisation : PER raisonnable (${d.pe.toFixed(1)}).`);
     else if (d.pe <= 30) reasonsWatch.push(`Valorisation : PER élevé (${d.pe.toFixed(1)}), dépend de la croissance.`);
@@ -273,7 +273,6 @@ function scoreFromData(d: ApiData) {
     reasonsWatch.push("Valorisation : PER indisponible.");
   }
 
-  // score simple
   const bad = reasonsBad.length;
   const good = reasonsGood.length;
 
@@ -293,6 +292,21 @@ function scoreFromData(d: ApiData) {
   return { tone, verdict, reasonsGood, reasonsWatch, reasonsBad, netDebt, ndEbitda };
 }
 
+/* ------------------------ Helpers graphique ------------------------ */
+function fmtPriceEuroLike(x: number) {
+  // format simple, pas de devise affichée (ça reste clean)
+  return x.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
+}
+
+function calcPerf(points: PricePoint[]) {
+  if (!points || points.length < 2) return null;
+  const first = points[0]?.close;
+  const last = points[points.length - 1]?.close;
+  if (!isNumber(first) || !isNumber(last) || first === 0) return null;
+  const pct = (last - first) / first;
+  return pct;
+}
+
 export default function Home() {
   const [symbol, setSymbol] = useState("AAPL");
   const [data, setData] = useState<ApiData | null>(null);
@@ -301,15 +315,22 @@ export default function Home() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
 
+  const [range, setRange] = useState<"1m" | "3m" | "6m" | "1y">("6m");
+  const [history, setHistory] = useState<PricePoint[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   const resultsRef = useRef<HTMLDivElement | null>(null);
 
   const canSearch = useMemo(() => symbol.trim().length >= 1, [symbol]);
 
   const fetchData = async () => {
     if (!canSearch) return;
+
     setLoading(true);
     setData(null);
     setNews([]);
+    setHistory([]);
+    setHistoryLoading(true);
 
     try {
       const res = await fetch(`/api/financials?symbol=${encodeURIComponent(symbol.trim())}`);
@@ -319,11 +340,19 @@ export default function Home() {
       const newsRes = await fetch(`/api/news?symbol=${encodeURIComponent(symbol.trim())}`);
       const newsJson = await newsRes.json();
       setNews(Array.isArray(newsJson.articles) ? newsJson.articles : []);
+
+      const histRes = await fetch(
+        `/api/history?symbol=${encodeURIComponent(symbol.trim())}&range=${encodeURIComponent(range)}`
+      );
+      const histJson = await histRes.json();
+      setHistory(Array.isArray(histJson.points) ? histJson.points : []);
     } catch (e) {
       setData({ error: "Erreur réseau (impossible de joindre l’API)." });
+      setHistory([]);
     } finally {
       setLoading(false);
-      // scroll doux vers résultats
+      setHistoryLoading(false);
+
       setTimeout(() => {
         resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 80);
@@ -334,13 +363,97 @@ export default function Home() {
     if (e.key === "Enter") fetchData();
   };
 
-  const headerTitle = data?.name ? data.name : "FinanceLab";
+  const headerTitle = data?.name ? data.name : "MyFinanceLab";
   const headerSub =
     data?.symbol && !data?.error
       ? `${data.symbol}${data.exchange ? " · " + data.exchange : ""}${data.sector ? " · " + data.sector : ""}`
       : "Analyse fondamentale claire et rapide";
 
   const synth = data && !data.error ? scoreFromData(data) : null;
+
+  const perf = calcPerf(history);
+  const perfTone: Tone =
+    perf == null ? "orange" : perf > 0.08 ? "green" : perf < -0.08 ? "red" : "orange";
+
+  const chartData = useMemo(() => {
+    const labels = history.map((p) => p.date);
+    const values = history.map((p) => p.close);
+
+    return {
+      labels,
+      datasets: [
+        {
+          label: "Prix",
+          data: values,
+          borderColor: "rgba(120,170,255,1)",
+          backgroundColor: "rgba(120,170,255,0.14)",
+          fill: true,
+          tension: 0.35,
+          pointRadius: 0,
+          borderWidth: 2,
+        },
+      ],
+    };
+  }, [history]);
+
+  const chartOptions = useMemo(() => {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 700 },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          intersect: false,
+          mode: "index" as const,
+          backgroundColor: "rgba(12,16,32,0.92)",
+          borderColor: "rgba(255,255,255,0.10)",
+          borderWidth: 1,
+          titleColor: "rgba(234,240,255,0.95)",
+          bodyColor: "rgba(234,240,255,0.90)",
+          padding: 12,
+          displayColors: false,
+          callbacks: {
+            title: (items: any) => {
+              const idx = items?.[0]?.dataIndex ?? 0;
+              const d = history[idx]?.date ?? "";
+              return d;
+            },
+            label: (item: any) => `Prix : ${fmtPriceEuroLike(item.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          display: false,
+          grid: { display: false },
+        },
+        y: {
+          display: true,
+          grid: { color: "rgba(255,255,255,0.06)" },
+          ticks: {
+            color: "rgba(234,240,255,0.70)",
+            callback: (v: any) => fmtPriceEuroLike(Number(v)),
+          },
+        },
+      },
+    };
+  }, [history]);
+
+  const onChangeRange = async (r: "1m" | "3m" | "6m" | "1y") => {
+    setRange(r);
+    if (!data?.symbol || data?.error) return;
+    setHistoryLoading(true);
+    try {
+      const histRes = await fetch(
+        `/api/history?symbol=${encodeURIComponent(data.symbol)}&range=${encodeURIComponent(r)}`
+      );
+      const histJson = await histRes.json();
+      setHistory(Array.isArray(histJson.points) ? histJson.points : []);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
 
   return (
     <>
@@ -349,16 +462,16 @@ export default function Home() {
         {/* Topbar */}
         <div className="fl-topbar fl-glass">
           <div className="fl-brand">
-            {/* ✅ SEUL CHANGEMENT : logo au lieu de "FL" */}
-            <img
-              src="/logo.png"
-              alt="MyFinanceLab"
-              className="fl-logo"
-              style={{ objectFit: "contain" }}
-            />
-            <div>
-              <div className="fl-brand-title">{headerTitle}</div>
-              <div className="fl-brand-sub">{headerSub}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <img
+                src="/logo.png"
+                alt="MyFinanceLab"
+                style={{ width: 34, height: 34, borderRadius: 10, objectFit: "contain" }}
+              />
+              <div>
+                <div className="fl-brand-title">{headerTitle}</div>
+                <div className="fl-brand-sub">{headerSub}</div>
+              </div>
             </div>
           </div>
 
@@ -467,9 +580,17 @@ export default function Home() {
         {/* Results */}
         {data && !data.error && synth && (
           <div className="fl-grid" ref={resultsRef}>
-            {/* SYNTHÈSE en premier */}
+            {/* SYNTHÈSE */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div
+                className="fl-card-header"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                }}
+              >
                 <div className="fl-card-title">Synthèse (automatique)</div>
                 <div className="fl-pill">
                   <Dot tone={synth.tone} />
@@ -525,6 +646,53 @@ export default function Home() {
               </div>
             </div>
 
+            {/* GRAPH PREMIUM */}
+            <div className="fl-card" style={{ gridColumn: "span 12" }}>
+              <div
+                className="fl-card-header"
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
+              >
+                <div className="fl-card-title">Prix (graphique)</div>
+
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <div className="fl-pill" title="Performance sur la période sélectionnée">
+                    <Dot tone={perfTone} />
+                    <span style={{ fontWeight: 900 }}>
+                      {perf == null ? "Performance —" : `Performance ${(perf * 100).toFixed(2).replace(".", ",")}%`}
+                    </span>
+                  </div>
+
+                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("1m")} disabled={historyLoading}>
+                    1M
+                  </button>
+                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("3m")} disabled={historyLoading}>
+                    3M
+                  </button>
+                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("6m")} disabled={historyLoading}>
+                    6M
+                  </button>
+                  <button className={`fl-btn secondary`} onClick={() => onChangeRange("1y")} disabled={historyLoading}>
+                    1Y
+                  </button>
+                </div>
+              </div>
+
+              <div className="fl-card-body">
+                <div style={{ height: 280 }}>
+                  {historyLoading ? (
+                    <div className="fl-skeleton" style={{ height: 280, borderRadius: 16 }} />
+                  ) : history.length === 0 ? (
+                    <div style={{ opacity: 0.7 }}>Aucune donnée disponible pour le graphique.</div>
+                  ) : (
+                    <Line data={chartData as any} options={chartOptions as any} />
+                  )}
+                </div>
+                <div style={{ opacity: 0.65, fontSize: 12, marginTop: 10 }}>
+                  Astuce : survole le graphique pour afficher la date et le prix exact.
+                </div>
+              </div>
+            </div>
+
             {/* Marché */}
             <Card title="Marché">
               <div className="fl-fields">
@@ -551,7 +719,10 @@ export default function Home() {
             <Card title="Bilan">
               <div className="fl-fields">
                 <Field label={<InfoTip k="totalDebt" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.totalDebt)} />
-                <Field label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.cashAndCashEquivalents)} />
+                <Field
+                  label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />}
+                  value={fmtMoneyCompact(data.cashAndCashEquivalents)}
+                />
                 <Field label="Capitaux propres" value={fmtMoneyCompact(data.totalEquity)} />
                 <Field label="Dette nette" value={fmtMoneyCompact(synth.netDebt)} sub="Dette - Cash" />
               </div>
@@ -563,11 +734,7 @@ export default function Home() {
                 <Field label="Operating CF" value={fmtMoneyCompact(data.operatingCashFlow)} sub="Flux opérationnel" />
                 <Field label="Capex" value={fmtMoneyCompact(data.capitalExpenditure)} sub="Investissements" />
                 <Field label={<InfoTip k="freeCashFlow" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.freeCashFlow)} sub="OCF - Capex" />
-                <Field
-                  label="Dette nette / EBITDA"
-                  value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
-                  sub="Niveau de risque"
-                />
+                <Field label="Dette nette / EBITDA" value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)} sub="Niveau de risque" />
               </div>
             </Card>
 
@@ -644,10 +811,10 @@ export default function Home() {
           </div>
         )}
 
-        {/* Footer (sans badge) */}
+        {/* Footer */}
         <div className="fl-footer">
-          <div>FinanceLab · Dashboard</div>
-          <div style={{ opacity: 0.7 }}>Notes : pense-bête perso (24h)</div>
+          <div>MyFinanceLab · Dashboard</div>
+          <div style={{ opacity: 0.7 }}>Notes : pense-bête perso</div>
         </div>
 
         {/* Modal définitions */}
@@ -658,9 +825,7 @@ export default function Home() {
               <div className="fl-modal-desc">{DEFINITIONS[openKey].desc}</div>
               <div className="fl-modal-how-title">Comment l’interpréter</div>
               <div className="fl-modal-how">{DEFINITIONS[openKey].how}</div>
-              {DEFINITIONS[openKey].warning && (
-                <div className="fl-modal-warn">{DEFINITIONS[openKey].warning}</div>
-              )}
+              {DEFINITIONS[openKey].warning && <div className="fl-modal-warn">{DEFINITIONS[openKey].warning}</div>}
               <button className="fl-modal-btn" onClick={() => setOpenKey(null)}>
                 Fermer
               </button>
