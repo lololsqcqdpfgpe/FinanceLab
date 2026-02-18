@@ -2,20 +2,6 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 
-import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  LineElement,
-  Tooltip,
-  Filler,
-  TimeScale,
-} from "chart.js";
-import { Line } from "react-chartjs-2";
-
-ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Tooltip, Filler, TimeScale);
-
 type ApiData = {
   error?: string;
 
@@ -61,7 +47,6 @@ type ApiData = {
 };
 
 type NewsItem = { title: string; url: string; site: string; date: string };
-type PricePoint = { date: string; close: number; volume?: number };
 type Tone = "green" | "orange" | "red";
 
 function isNumber(x: any): x is number {
@@ -155,12 +140,7 @@ function Dot({ tone }: { tone: Tone }) {
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section
-      className="fl-card"
-      style={{
-        transition: "transform 180ms ease, box-shadow 180ms ease",
-      }}
-    >
+    <section className="fl-card" style={{ transition: "transform 180ms ease, box-shadow 180ms ease" }}>
       <div className="fl-card-header">
         <div className="fl-card-title">{title}</div>
       </div>
@@ -240,12 +220,9 @@ function scoreFromData(d: ApiData) {
   const reasonsBad: string[] = [];
 
   const netDebt =
-    isNumber(d.totalDebt) && isNumber(d.cashAndCashEquivalents)
-      ? d.totalDebt - d.cashAndCashEquivalents
-      : null;
+    isNumber(d.totalDebt) && isNumber(d.cashAndCashEquivalents) ? d.totalDebt - d.cashAndCashEquivalents : null;
 
-  const ndEbitda =
-    isNumber(netDebt) && isNumber(d.ebitda) && d.ebitda !== 0 ? netDebt / d.ebitda : null;
+  const ndEbitda = isNumber(netDebt) && isNumber(d.ebitda) && d.ebitda !== 0 ? netDebt / d.ebitda : null;
 
   if (ndEbitda === null) reasonsWatch.push("Endettement : données insuffisantes pour juger correctement.");
   else if (ndEbitda < 2) reasonsGood.push(`Endettement sain (Dette nette/EBITDA ≈ ${ndEbitda.toFixed(2)}).`);
@@ -297,51 +274,184 @@ function scoreFromData(d: ApiData) {
   return { tone, verdict, reasonsGood, reasonsWatch, reasonsBad, netDebt, ndEbitda };
 }
 
-/* ------------------------ Graph helpers ------------------------ */
-function fmtPriceEuroLike(x: number) {
-  return x.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
-}
-
-function calcPerf(points: PricePoint[]) {
-  if (!points || points.length < 2) return null;
-  const first = points[0]?.close;
-  const last = points[points.length - 1]?.close;
-  if (!isNumber(first) || !isNumber(last) || first === 0) return null;
-  return (last - first) / first;
-}
-
-function extractErrMessage(payload: any): string | null {
-  if (!payload) return null;
-  if (typeof payload === "string") return payload;
-  if (typeof payload?.error === "string") return payload.error;
-  if (typeof payload?.message === "string") return payload.message;
-  return null;
-}
-
-function toneFromPerf(perf: number | null): Tone {
-  if (perf == null) return "orange";
-  if (perf > 0.08) return "green";
-  if (perf < -0.08) return "red";
-  return "orange";
-}
-
+/* ------------------------ Helpers pour le bloc WOW ------------------------ */
 function toneFromPe(pe: number | null | undefined): Tone {
   if (!isNumber(pe)) return "orange";
   if (pe <= 15) return "green";
   if (pe <= 30) return "orange";
   return "red";
 }
-
 function toneFromMargin(m: number | null | undefined): Tone {
   if (!isNumber(m)) return "orange";
   if (m >= 0.10) return "green";
   if (m >= 0.03) return "orange";
   return "red";
 }
-
 function toneFromFCF(fcf: number | null | undefined): Tone {
   if (!isNumber(fcf)) return "orange";
   return fcf > 0 ? "green" : "red";
+}
+function toneFromNdEbitda(x: number | null | undefined): Tone {
+  if (!isNumber(x)) return "orange";
+  if (x < 2) return "green";
+  if (x < 4) return "orange";
+  return "red";
+}
+function toneToColor(t: Tone) {
+  if (t === "green") return "rgba(34,197,94,0.95)";
+  if (t === "red") return "rgba(239,68,68,0.95)";
+  return "rgba(245,158,11,0.95)";
+}
+function score01FromTone(t: Tone) {
+  if (t === "green") return 0.85;
+  if (t === "orange") return 0.55;
+  return 0.25;
+}
+function scoreFromMetrics(d: ApiData, synth: ReturnType<typeof scoreFromData>) {
+  const tVal = toneFromPe(d.pe);
+  const tRisk = toneFromNdEbitda(synth.ndEbitda);
+  const tCash = toneFromFCF(d.freeCashFlow);
+  const tQual = toneFromMargin(d.netMargin);
+
+  const val = score01FromTone(tVal);
+  const risk = score01FromTone(tRisk);
+  const cash = score01FromTone(tCash);
+  const qual = score01FromTone(tQual);
+
+  // pondération légère (risque un peu plus important)
+  const total01 = clamp(0.26 * val + 0.30 * risk + 0.22 * cash + 0.22 * qual, 0, 1);
+  const total = Math.round(total01 * 100);
+
+  const tone: Tone = total >= 72 ? "green" : total >= 45 ? "orange" : "red";
+
+  return {
+    total,
+    tone,
+    pillars: [
+      { k: "Valorisation", value01: val, tone: tVal, hint: d.pe == null ? "PER —" : `PER ${d.pe.toFixed(1)}` },
+      {
+        k: "Risque",
+        value01: risk,
+        tone: tRisk,
+        hint: synth.ndEbitda == null ? "DN/EBITDA —" : `DN/EBITDA ${synth.ndEbitda.toFixed(2)}`,
+      },
+      { k: "Cash", value01: cash, tone: tCash, hint: `FCF ${fmtMoneyCompact(d.freeCashFlow)}` },
+      { k: "Qualité", value01: qual, tone: tQual, hint: `Marge nette ${fmtSignedPct(d.netMargin)}` },
+    ],
+  };
+}
+
+function RingMeter({
+  value,
+  tone,
+  label,
+  sub,
+}: {
+  value: number; // 0..100
+  tone: Tone;
+  label: string;
+  sub?: string;
+}) {
+  const r = 44;
+  const c = 2 * Math.PI * r;
+  const pct = clamp(value / 100, 0, 1);
+  const dash = c * pct;
+  const col = toneToColor(tone);
+
+  return (
+    <div className="fl-wow-ring">
+      <svg width="120" height="120" viewBox="0 0 120 120" className="fl-wow-svg">
+        <defs>
+          <linearGradient id="flRingGlow" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="rgba(99,102,241,0.95)" />
+            <stop offset="55%" stopColor="rgba(56,189,248,0.80)" />
+            <stop offset="100%" stopColor="rgba(16,185,129,0.70)" />
+          </linearGradient>
+          <filter id="flSoftGlow">
+            <feGaussianBlur stdDeviation="2.4" result="b" />
+            <feMerge>
+              <feMergeNode in="b" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+        </defs>
+
+        {/* track */}
+        <circle cx="60" cy="60" r={r} stroke="rgba(255,255,255,0.10)" strokeWidth="10" fill="none" />
+        {/* value glow */}
+        <circle
+          cx="60"
+          cy="60"
+          r={r}
+          stroke="url(#flRingGlow)"
+          strokeWidth="12"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${dash} ${c - dash}`}
+          transform="rotate(-90 60 60)"
+          filter="url(#flSoftGlow)"
+          style={{ opacity: 0.35 }}
+        />
+        {/* value main */}
+        <circle
+          cx="60"
+          cy="60"
+          r={r}
+          stroke={col}
+          strokeWidth="10"
+          fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${dash} ${c - dash}`}
+          transform="rotate(-90 60 60)"
+          style={{ transition: "stroke-dasharray 700ms ease" }}
+        />
+
+        <text x="60" y="56" textAnchor="middle" fontSize="22" fontWeight="900" fill="rgba(234,240,255,0.95)">
+          {value}
+        </text>
+        <text x="60" y="76" textAnchor="middle" fontSize="11" fontWeight="800" fill="rgba(234,240,255,0.70)">
+          /100
+        </text>
+      </svg>
+
+      <div className="fl-wow-ring-label">{label}</div>
+      {sub ? <div className="fl-wow-ring-sub">{sub}</div> : null}
+    </div>
+  );
+}
+
+function PillarBar({
+  title,
+  value01,
+  tone,
+  hint,
+}: {
+  title: string;
+  value01: number;
+  tone: Tone;
+  hint: string;
+}) {
+  const w = Math.round(clamp(value01, 0, 1) * 100);
+  return (
+    <div className="fl-wow-bar">
+      <div className="fl-wow-bar-top">
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className={`fl-dot ${tone}`} />
+          <span style={{ fontWeight: 950 }}>{title}</span>
+        </div>
+        <div style={{ opacity: 0.75, fontWeight: 900 }}>{hint}</div>
+      </div>
+      <div className="fl-wow-bar-track">
+        <div
+          className="fl-wow-bar-fill"
+          style={{
+            width: `${w}%`,
+            background: `linear-gradient(90deg, ${toneToColor(tone)}, rgba(255,255,255,0.08))`,
+          }}
+        />
+      </div>
+    </div>
+  );
 }
 
 const LS_RECENTS = "mfl_recents_v1";
@@ -354,11 +464,6 @@ export default function Home() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
-
-  const [range, setRange] = useState<"1m" | "3m" | "6m" | "1y">("6m");
-  const [history, setHistory] = useState<PricePoint[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
-  const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [recents, setRecents] = useState<string[]>([]);
   const [autoMode, setAutoMode] = useState(true); // auto-search soft (debounce)
@@ -420,9 +525,6 @@ export default function Home() {
     setLoading(true);
     setData(null);
     setNews([]);
-    setHistory([]);
-    setHistoryError(null);
-    setHistoryLoading(true);
     setNewsLoading(true);
 
     try {
@@ -438,27 +540,11 @@ export default function Home() {
       const newsJson = await newsRes.json();
       setNews(Array.isArray(newsJson.articles) ? newsJson.articles : []);
       setNewsLoading(false);
-
-      // 3) History (graph)
-      const histRes = await fetch(
-        `/api/history?symbol=${encodeURIComponent(sym)}&range=${encodeURIComponent(range)}`
-      );
-      const histJson = await histRes.json();
-
-      if (!histRes.ok) {
-        setHistory([]);
-        setHistoryError(extractErrMessage(histJson) ?? "Impossible de charger l’historique.");
-      } else {
-        setHistory(Array.isArray(histJson.points) ? histJson.points : []);
-        setHistoryError(null);
-      }
     } catch {
       setData({ error: "Erreur réseau (impossible de joindre l’API)." });
-      setHistory([]);
-      setHistoryError("Erreur réseau sur l’historique.");
+      setNews([]);
     } finally {
       setLoading(false);
-      setHistoryLoading(false);
       setNewsLoading(false);
       setLastFetchAt(Date.now());
 
@@ -478,10 +564,7 @@ export default function Home() {
     const s = symbol.trim();
     if (!s) return;
 
-    // évite auto-fetch au premier render trop agressif
     const t = setTimeout(() => {
-      // auto seulement si utilisateur a vraiment modifié depuis dernière requête
-      // (simple : si ça fait >800ms qu'il tape)
       fetchData(s);
     }, 900);
 
@@ -497,110 +580,116 @@ export default function Home() {
 
   const synth = data && !data.error ? scoreFromData(data) : null;
 
-  const perf = calcPerf(history);
-  const perfTone = toneFromPerf(perf);
-
-  const chartData = useMemo(() => {
-    const labels = history.map((p) => p.date);
-    const values = history.map((p) => p.close);
-    return {
-      labels,
-      datasets: [
-        {
-          label: "Prix",
-          data: values,
-          fill: true,
-          tension: 0.35,
-          pointRadius: 0,
-          borderWidth: 2,
-          borderColor: "rgba(120,170,255,1)",
-          backgroundColor: "rgba(120,170,255,0.14)",
-        },
-      ],
-    };
-  }, [history]);
-
-  const chartOptions = useMemo(() => {
-    return {
-      responsive: true,
-      maintainAspectRatio: false,
-      animation: { duration: 700 },
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          intersect: false,
-          mode: "index" as const,
-          backgroundColor: "rgba(12,16,32,0.92)",
-          borderColor: "rgba(255,255,255,0.10)",
-          borderWidth: 1,
-          titleColor: "rgba(234,240,255,0.95)",
-          bodyColor: "rgba(234,240,255,0.90)",
-          padding: 12,
-          displayColors: false,
-          callbacks: {
-            title: (items: any) => {
-              const idx = items?.[0]?.dataIndex ?? 0;
-              return history[idx]?.date ?? "";
-            },
-            label: (item: any) => `Prix : ${fmtPriceEuroLike(item.parsed.y)}`,
-          },
-        },
-      },
-      scales: {
-        x: { display: false, grid: { display: false } },
-        y: {
-          display: true,
-          grid: { color: "rgba(255,255,255,0.06)" },
-          ticks: {
-            color: "rgba(234,240,255,0.70)",
-            callback: (v: any) => fmtPriceEuroLike(Number(v)),
-          },
-        },
-      },
-    };
-  }, [history]);
-
-  const onChangeRange = async (r: "1m" | "3m" | "6m" | "1y") => {
-    setRange(r);
-    if (!symbol.trim()) return;
-
-    setHistoryLoading(true);
-    setHistoryError(null);
-
-    try {
-      const histRes = await fetch(
-        `/api/history?symbol=${encodeURIComponent(symbol.trim())}&range=${encodeURIComponent(r)}`
-      );
-      const histJson = await histRes.json();
-
-      if (!histRes.ok) {
-        setHistory([]);
-        setHistoryError(extractErrMessage(histJson) ?? "Impossible de charger l’historique.");
-      } else {
-        setHistory(Array.isArray(histJson.points) ? histJson.points : []);
-        setHistoryError(null);
-      }
-    } finally {
-      setHistoryLoading(false);
-    }
-  };
-
-  // Tones (Key insights)
-  const peTone = toneFromPe(data?.pe);
-  const fcfTone = toneFromFCF(data?.freeCashFlow);
-  const marginTone = toneFromMargin(data?.netMargin);
-
-  const ndTone: Tone =
-    synth?.ndEbitda == null ? "orange" : synth.ndEbitda < 2 ? "green" : synth.ndEbitda < 4 ? "orange" : "red";
+  const wow = useMemo(() => {
+    if (!data || data.error || !synth) return null;
+    return scoreFromMetrics(data, synth);
+  }, [data, synth]);
 
   const lastFetchLabel =
-    lastFetchAt == null ? "—" : new Date(lastFetchAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    lastFetchAt == null
+      ? "—"
+      : new Date(lastFetchAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 
   return (
     <>
-      {/* tiny animation helper (safe inline) */}
       <style>{`
         @keyframes flFadeIn { from { opacity: 0; transform: translateY(3px);} to { opacity: 1; transform: translateY(0);} }
+        @keyframes flFloat { 0% { transform: translateY(0);} 50% { transform: translateY(-3px);} 100% { transform: translateY(0);} }
+        @keyframes flSheen { 0% { transform: translateX(-40%);} 100% { transform: translateX(140%);} }
+        .fl-wow {
+          position: relative;
+          border-radius: 18px;
+          border: 1px solid rgba(255,255,255,0.08);
+          background: rgba(255,255,255,0.04);
+          overflow: hidden;
+        }
+        .fl-wow::before {
+          content: "";
+          position: absolute;
+          inset: -2px;
+          background:
+            radial-gradient(800px 360px at 15% 10%, rgba(99,102,241,0.28), transparent 60%),
+            radial-gradient(700px 360px at 85% 35%, rgba(56,189,248,0.18), transparent 60%),
+            radial-gradient(800px 420px at 50% 110%, rgba(16,185,129,0.15), transparent 60%);
+          pointer-events: none;
+        }
+        .fl-wow::after {
+          content: "";
+          position: absolute;
+          top: -50%;
+          left: -60%;
+          width: 60%;
+          height: 200%;
+          background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
+          transform: rotate(14deg);
+          animation: flSheen 2.8s ease-in-out infinite;
+          pointer-events: none;
+          opacity: 0.55;
+        }
+        .fl-wow-inner { position: relative; padding: 16px; display: grid; gap: 14px; }
+        .fl-wow-head {
+          display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+        }
+        .fl-wow-title { font-weight: 950; letter-spacing: -0.2px; }
+        .fl-wow-sub { opacity: 0.72; font-size: 12px; }
+        .fl-wow-grid {
+          display: grid;
+          grid-template-columns: 220px 1fr;
+          gap: 14px;
+          align-items: stretch;
+        }
+        @media (max-width: 860px) {
+          .fl-wow-grid { grid-template-columns: 1fr; }
+        }
+        .fl-wow-ring {
+          border-radius: 18px;
+          border: 1px solid rgba(255,255,255,0.10);
+          background: rgba(0,0,0,0.18);
+          padding: 14px;
+          display: grid;
+          place-items: center;
+          text-align: center;
+          animation: flFloat 2.6s ease-in-out infinite;
+        }
+        .fl-wow-ring-label { margin-top: 6px; font-weight: 950; }
+        .fl-wow-ring-sub { margin-top: 4px; font-size: 12px; opacity: 0.72; }
+        .fl-wow-bars {
+          border-radius: 18px;
+          border: 1px solid rgba(255,255,255,0.10);
+          background: rgba(0,0,0,0.18);
+          padding: 14px;
+          display: grid;
+          gap: 12px;
+        }
+        .fl-wow-bar-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+        .fl-wow-bar-track {
+          height: 12px;
+          border-radius: 999px;
+          background: rgba(255,255,255,0.08);
+          border: 1px solid rgba(255,255,255,0.10);
+          overflow: hidden;
+        }
+        .fl-wow-bar-fill {
+          height: 100%;
+          border-radius: 999px;
+          transition: width 700ms ease;
+          box-shadow: 0 10px 26px rgba(0,0,0,0.18);
+        }
+        .fl-wow-mini {
+          display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+        }
+        .fl-wow-chip {
+          padding: 8px 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(255,255,255,0.10);
+          background: rgba(0,0,0,0.18);
+          display: inline-flex;
+          align-items: center;
+          gap: 10px;
+          font-weight: 900;
+          font-size: 12px;
+          opacity: 0.98;
+        }
       `}</style>
 
       <div className="fl-bg-glow" />
@@ -636,7 +725,15 @@ export default function Home() {
 
         {/* Hero */}
         <div className="fl-hero fl-glass">
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              alignItems: "flex-start",
+              flexWrap: "wrap",
+            }}
+          >
             <div>
               <h1 className="fl-h1" style={{ marginBottom: 6 }}>
                 Recherche d’entreprise
@@ -647,7 +744,6 @@ export default function Home() {
               </p>
             </div>
 
-            {/* mini controls */}
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
               <div className="fl-pill" title="Raccourci clavier">
                 <span style={{ fontWeight: 900 }}>⌘/Ctrl</span>
@@ -688,9 +784,7 @@ export default function Home() {
                 onKeyDown={onKeyDown}
                 placeholder="Ex: AAPL"
                 className="fl-input"
-                style={{
-                  transition: "transform 160ms ease, box-shadow 160ms ease",
-                }}
+                style={{ transition: "transform 160ms ease, box-shadow 160ms ease" }}
               />
               <div className="fl-input-hint">
                 Astuce : mets <strong>.PA</strong> pour Euronext Paris (ex : <code className="fl-code">AIR.PA</code>)
@@ -781,54 +875,95 @@ export default function Home() {
         {/* Results */}
         {data && !data.error && synth && (
           <div className="fl-grid" ref={resultsRef} style={{ animation: "flFadeIn 200ms ease" as any }}>
-            {/* KEY INSIGHTS */}
-            <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div
-                className="fl-card-header"
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
-              >
-                <div className="fl-card-title">Key insights</div>
-                <div style={{ opacity: 0.7, fontSize: 12 }}>
-                  Résumé visuel · {data.symbol ?? "—"} · Range {range.toUpperCase()}
+            {/* WOW PANEL (remplace le graphique) */}
+            {wow && (
+              <div className="fl-card fl-wow" style={{ gridColumn: "span 12" }}>
+                <div className="fl-wow-inner">
+                  <div className="fl-wow-head">
+                    <div>
+                      <div className="fl-wow-title">Pulse Board</div>
+                      <div className="fl-wow-sub">
+                        Score visuel basé sur : valorisation (PER), risque (DN/EBITDA), cash (FCF), qualité (marge nette).
+                      </div>
+                    </div>
+
+                    <div className="fl-wow-mini">
+                      <span className="fl-wow-chip" title="Résumé du scoring">
+                        <Dot tone={wow.tone} />
+                        <span>Score global</span>
+                        <span style={{ opacity: 0.75 }}>·</span>
+                        <span style={{ fontWeight: 950 }}>{wow.total}/100</span>
+                      </span>
+
+                      <span className="fl-wow-chip" title="Nombre d’actus chargées">
+                        <Dot tone={news.length > 0 ? "green" : "orange"} />
+                        <span>Actus</span>
+                        <span style={{ opacity: 0.75 }}>·</span>
+                        <span style={{ fontWeight: 950 }}>{newsLoading ? "…" : news.length}</span>
+                      </span>
+
+                      <span className="fl-wow-chip" title="Verdict automatique (règles simples)">
+                        <Dot tone={synth.tone} />
+                        <span>{synth.verdict}</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="fl-wow-grid">
+                    <RingMeter
+                      value={wow.total}
+                      tone={wow.tone}
+                      label="Score"
+                      sub={data.symbol ? `${data.symbol}${data.exchange ? " · " + data.exchange : ""}` : "—"}
+                    />
+
+                    <div className="fl-wow-bars">
+                      {wow.pillars.map((p) => (
+                        <PillarBar
+                          key={p.k}
+                          title={p.k}
+                          value01={p.value01}
+                          tone={p.tone}
+                          hint={p.hint}
+                        />
+                      ))}
+
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 2 }}>
+                        <span className="fl-wow-chip" title="PER">
+                          <Dot tone={toneFromPe(data.pe)} />
+                          <span>PER</span>
+                          <span style={{ opacity: 0.75 }}>·</span>
+                          <span style={{ fontWeight: 950 }}>{data.pe == null ? "—" : data.pe.toFixed(1)}</span>
+                        </span>
+
+                        <span className="fl-wow-chip" title="Dette nette / EBITDA">
+                          <Dot tone={toneFromNdEbitda(synth.ndEbitda)} />
+                          <span>DN/EBITDA</span>
+                          <span style={{ opacity: 0.75 }}>·</span>
+                          <span style={{ fontWeight: 950 }}>
+                            {synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
+                          </span>
+                        </span>
+
+                        <span className="fl-wow-chip" title="Free Cash Flow">
+                          <Dot tone={toneFromFCF(data.freeCashFlow)} />
+                          <span>FCF</span>
+                          <span style={{ opacity: 0.75 }}>·</span>
+                          <span style={{ fontWeight: 950 }}>{fmtMoneyCompact(data.freeCashFlow)}</span>
+                        </span>
+
+                        <span className="fl-wow-chip" title="Marge nette">
+                          <Dot tone={toneFromMargin(data.netMargin)} />
+                          <span>Marge nette</span>
+                          <span style={{ opacity: 0.75 }}>·</span>
+                          <span style={{ fontWeight: 950 }}>{fmtSignedPct(data.netMargin)}</span>
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
-
-              <div className="fl-card-body" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <div className="fl-pill" title="PER (valorisation)">
-                  <Dot tone={peTone} />
-                  <span style={{ fontWeight: 900 }}>PER</span>
-                  <span style={{ opacity: 0.85, marginLeft: 8 }}>{data.pe == null ? "—" : data.pe.toFixed(1)}</span>
-                </div>
-
-                <div className="fl-pill" title="Dette nette / EBITDA (risque)">
-                  <Dot tone={ndTone} />
-                  <span style={{ fontWeight: 900 }}>DN/EBITDA</span>
-                  <span style={{ opacity: 0.85, marginLeft: 8 }}>
-                    {synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
-                  </span>
-                </div>
-
-                <div className="fl-pill" title="Free Cash Flow">
-                  <Dot tone={fcfTone} />
-                  <span style={{ fontWeight: 900 }}>FCF</span>
-                  <span style={{ opacity: 0.85, marginLeft: 8 }}>{fmtMoneyCompact(data.freeCashFlow)}</span>
-                </div>
-
-                <div className="fl-pill" title="Marge nette">
-                  <Dot tone={marginTone} />
-                  <span style={{ fontWeight: 900 }}>Marge nette</span>
-                  <span style={{ opacity: 0.85, marginLeft: 8 }}>{fmtSignedPct(data.netMargin)}</span>
-                </div>
-
-                <div className="fl-pill" title="Performance sur la période sélectionnée">
-                  <Dot tone={perfTone} />
-                  <span style={{ fontWeight: 900 }}>Perf</span>
-                  <span style={{ opacity: 0.85, marginLeft: 8 }}>
-                    {perf == null ? "—" : fmtSignedPct(perf)}
-                  </span>
-                </div>
-              </div>
-            </div>
+            )}
 
             {/* SYNTHÈSE */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
@@ -891,66 +1026,22 @@ export default function Home() {
               </div>
             </div>
 
-            {/* GRAPH */}
-            <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div
-                className="fl-card-header"
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
-              >
-                <div className="fl-card-title">Prix (graphique)</div>
-
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <div className="fl-pill" title="Performance sur la période sélectionnée">
-                    <Dot tone={perfTone} />
-                    <span style={{ fontWeight: 900 }}>
-                      {perf == null ? "Performance —" : `Performance ${(perf * 100).toFixed(2).replace(".", ",")}%`}
-                    </span>
-                  </div>
-
-                  <button className="fl-btn secondary" onClick={() => onChangeRange("1m")} disabled={historyLoading}>
-                    1M
-                  </button>
-                  <button className="fl-btn secondary" onClick={() => onChangeRange("3m")} disabled={historyLoading}>
-                    3M
-                  </button>
-                  <button className="fl-btn secondary" onClick={() => onChangeRange("6m")} disabled={historyLoading}>
-                    6M
-                  </button>
-                  <button className="fl-btn secondary" onClick={() => onChangeRange("1y")} disabled={historyLoading}>
-                    1Y
-                  </button>
-                </div>
-              </div>
-
-              <div className="fl-card-body">
-                <div style={{ height: 280 }}>
-                  {historyLoading ? (
-                    <div className="fl-skeleton" style={{ height: 280, borderRadius: 16 }} />
-                  ) : historyError ? (
-                    <div style={{ opacity: 0.8 }}>
-                      <div style={{ fontWeight: 900, marginBottom: 6 }}>Graph indisponible</div>
-                      <div style={{ opacity: 0.8 }}>{historyError}</div>
-                    </div>
-                  ) : history.length === 0 ? (
-                    <div style={{ opacity: 0.7 }}>Aucune donnée disponible pour le graphique.</div>
-                  ) : (
-                    <Line data={chartData as any} options={chartOptions as any} />
-                  )}
-                </div>
-                <div style={{ opacity: 0.65, fontSize: 12, marginTop: 10 }}>
-                  Astuce : survole le graphique pour afficher la date et le prix exact.
-                </div>
-              </div>
-            </div>
-
             {/* Marché */}
             <Card title="Marché">
               <div className="fl-fields">
                 <Field label="Prix" value={fmtNumber(data.price)} sub="Dernier cours" />
                 <Field label="Capitalisation" value={fmtMoneyCompact(data.marketCap)} sub="Market Cap" />
                 <Field label="Volume" value={fmtNumber(data.volume)} sub="Volume du jour" />
-                <Field label="Jour" value={`${fmtNumber(data.dayLow)} → ${fmtNumber(data.dayHigh)}`} sub="Plus bas → Plus haut" />
-                <Field label="52 semaines" value={`${fmtNumber(data.yearLow)} → ${fmtNumber(data.yearHigh)}`} sub="Plus bas → Plus haut" />
+                <Field
+                  label="Jour"
+                  value={`${fmtNumber(data.dayLow)} → ${fmtNumber(data.dayHigh)}`}
+                  sub="Plus bas → Plus haut"
+                />
+                <Field
+                  label="52 semaines"
+                  value={`${fmtNumber(data.yearLow)} → ${fmtNumber(data.yearHigh)}`}
+                  sub="Plus bas → Plus haut"
+                />
               </div>
             </Card>
 
@@ -960,7 +1051,10 @@ export default function Home() {
                 <Field label="Période" value={data.period ?? "—"} sub="Dernière période connue" />
                 <Field label={<InfoTip k="revenue" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.revenue)} />
                 <Field label={<InfoTip k="ebitda" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.ebitda)} />
-                <Field label={<InfoTip k="operatingIncome" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.operatingIncome)} />
+                <Field
+                  label={<InfoTip k="operatingIncome" onOpen={setOpenKey} />}
+                  value={fmtMoneyCompact(data.operatingIncome)}
+                />
                 <Field label={<InfoTip k="netIncome" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.netIncome)} />
               </div>
             </Card>
@@ -983,8 +1077,16 @@ export default function Home() {
               <div className="fl-fields">
                 <Field label="Operating CF" value={fmtMoneyCompact(data.operatingCashFlow)} sub="Flux opérationnel" />
                 <Field label="Capex" value={fmtMoneyCompact(data.capitalExpenditure)} sub="Investissements" />
-                <Field label={<InfoTip k="freeCashFlow" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.freeCashFlow)} sub="OCF - Capex" />
-                <Field label="Dette nette / EBITDA" value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)} sub="Niveau de risque" />
+                <Field
+                  label={<InfoTip k="freeCashFlow" onOpen={setOpenKey} />}
+                  value={fmtMoneyCompact(data.freeCashFlow)}
+                  sub="OCF - Capex"
+                />
+                <Field
+                  label="Dette nette / EBITDA"
+                  value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
+                  sub="Niveau de risque"
+                />
               </div>
             </Card>
 
