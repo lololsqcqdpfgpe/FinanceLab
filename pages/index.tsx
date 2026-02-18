@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/router";
 
 import {
@@ -61,9 +61,7 @@ type ApiData = {
 };
 
 type NewsItem = { title: string; url: string; site: string; date: string };
-
 type PricePoint = { date: string; close: number; volume?: number };
-
 type Tone = "green" | "orange" | "red";
 
 function isNumber(x: any): x is number {
@@ -87,6 +85,17 @@ function fmtMoneyCompact(x: any) {
 function fmtPct(x: any) {
   if (!isNumber(x)) return "—";
   return (x * 100).toFixed(2).replace(".", ",") + "%";
+}
+
+function fmtSignedPct(x: any) {
+  if (!isNumber(x)) return "—";
+  const v = x * 100;
+  const sign = v > 0 ? "+" : "";
+  return sign + v.toFixed(2).replace(".", ",") + "%";
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
 }
 
 /* ------------------------ Notions ------------------------ */
@@ -146,7 +155,12 @@ function Dot({ tone }: { tone: Tone }) {
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="fl-card">
+    <section
+      className="fl-card"
+      style={{
+        transition: "transform 180ms ease, box-shadow 180ms ease",
+      }}
+    >
       <div className="fl-card-header">
         <div className="fl-card-title">{title}</div>
       </div>
@@ -180,8 +194,9 @@ function InfoTip({ k, onOpen }: { k: keyof typeof DEFINITIONS; onOpen: (key: str
   const d = DEFINITIONS[k];
 
   return (
-    <span className="fl-info">
+    <span className="fl-info" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
       <span style={{ fontWeight: 950 }}>{d.title}</span>
+
       <span
         className="fl-info-icon"
         onMouseEnter={() => setOpen(true)}
@@ -198,12 +213,17 @@ function InfoTip({ k, onOpen }: { k: keyof typeof DEFINITIONS; onOpen: (key: str
         tabIndex={0}
         aria-label={`Info: ${d.title}`}
         title="Survol = aperçu · Clic = détail"
+        style={{
+          cursor: "pointer",
+          transform: open ? "translateY(-1px)" : "translateY(0)",
+          transition: "transform 150ms ease",
+        }}
       >
         i
       </span>
 
       {open && (
-        <span className="fl-tooltip">
+        <span className="fl-tooltip" style={{ animation: "flFadeIn 140ms ease" as any }}>
           <span className="fl-tooltip-title">{d.title}</span>
           <span className="fl-tooltip-text">{d.short ?? d.desc}</span>
           <span className="fl-tooltip-hint">Clic pour le détail</span>
@@ -298,6 +318,34 @@ function extractErrMessage(payload: any): string | null {
   return null;
 }
 
+function toneFromPerf(perf: number | null): Tone {
+  if (perf == null) return "orange";
+  if (perf > 0.08) return "green";
+  if (perf < -0.08) return "red";
+  return "orange";
+}
+
+function toneFromPe(pe: number | null | undefined): Tone {
+  if (!isNumber(pe)) return "orange";
+  if (pe <= 15) return "green";
+  if (pe <= 30) return "orange";
+  return "red";
+}
+
+function toneFromMargin(m: number | null | undefined): Tone {
+  if (!isNumber(m)) return "orange";
+  if (m >= 0.10) return "green";
+  if (m >= 0.03) return "orange";
+  return "red";
+}
+
+function toneFromFCF(fcf: number | null | undefined): Tone {
+  if (!isNumber(fcf)) return "orange";
+  return fcf > 0 ? "green" : "red";
+}
+
+const LS_RECENTS = "mfl_recents_v1";
+
 export default function Home() {
   const [symbol, setSymbol] = useState("AAPL");
   const [data, setData] = useState<ApiData | null>(null);
@@ -305,17 +353,69 @@ export default function Home() {
 
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
+  const [newsLoading, setNewsLoading] = useState(false);
 
   const [range, setRange] = useState<"1m" | "3m" | "6m" | "1y">("6m");
   const [history, setHistory] = useState<PricePoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
+  const [recents, setRecents] = useState<string[]>([]);
+  const [autoMode, setAutoMode] = useState(true); // auto-search soft (debounce)
+  const [lastFetchAt, setLastFetchAt] = useState<number | null>(null);
+
   const resultsRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
   const canSearch = useMemo(() => symbol.trim().length >= 1, [symbol]);
 
-  const fetchData = async () => {
-    if (!canSearch) return;
+  // Load recents
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(LS_RECENTS);
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) setRecents(arr.filter((x) => typeof x === "string").slice(0, 8));
+      }
+    } catch { }
+  }, []);
+
+  const saveRecent = (sym: string) => {
+    const s = sym.trim().toUpperCase();
+    if (!s) return;
+    setRecents((prev) => {
+      const next = [s, ...prev.filter((x) => x !== s)].slice(0, 8);
+      try {
+        localStorage.setItem(LS_RECENTS, JSON.stringify(next));
+      } catch { }
+      return next;
+    });
+  };
+
+  // Keyboard shortcuts (Cmd/Ctrl+K focus, Esc close modal)
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.toLowerCase().includes("mac");
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+
+      if (mod && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        inputRef.current?.focus();
+        inputRef.current?.select();
+      }
+
+      if (e.key === "Escape") {
+        setOpenKey(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const fetchData = async (forcedSymbol?: string) => {
+    const sym = (forcedSymbol ?? symbol).trim();
+    if (!sym) return;
 
     setLoading(true);
     setData(null);
@@ -323,23 +423,26 @@ export default function Home() {
     setHistory([]);
     setHistoryError(null);
     setHistoryLoading(true);
+    setNewsLoading(true);
 
     try {
-      const sym = symbol.trim();
+      saveRecent(sym);
 
       // 1) Financials
       const res = await fetch(`/api/financials?symbol=${encodeURIComponent(sym)}`);
       const json = (await res.json()) as ApiData;
       setData(json);
 
-      // si déjà erreur côté API financials, on peut quand même tenter news/history,
-      // mais on garde ton UX simple : on laisse quand même faire.
+      // 2) News
       const newsRes = await fetch(`/api/news?symbol=${encodeURIComponent(sym)}`);
       const newsJson = await newsRes.json();
       setNews(Array.isArray(newsJson.articles) ? newsJson.articles : []);
+      setNewsLoading(false);
 
-      // 2) History (graph)
-      const histRes = await fetch(`/api/history?symbol=${encodeURIComponent(sym)}&range=${encodeURIComponent(range)}`);
+      // 3) History (graph)
+      const histRes = await fetch(
+        `/api/history?symbol=${encodeURIComponent(sym)}&range=${encodeURIComponent(range)}`
+      );
       const histJson = await histRes.json();
 
       if (!histRes.ok) {
@@ -356,6 +459,8 @@ export default function Home() {
     } finally {
       setLoading(false);
       setHistoryLoading(false);
+      setNewsLoading(false);
+      setLastFetchAt(Date.now());
 
       setTimeout(() => {
         resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -367,6 +472,23 @@ export default function Home() {
     if (e.key === "Enter") fetchData();
   };
 
+  // Auto-mode debounce (soft)
+  useEffect(() => {
+    if (!autoMode) return;
+    const s = symbol.trim();
+    if (!s) return;
+
+    // évite auto-fetch au premier render trop agressif
+    const t = setTimeout(() => {
+      // auto seulement si utilisateur a vraiment modifié depuis dernière requête
+      // (simple : si ça fait >800ms qu'il tape)
+      fetchData(s);
+    }, 900);
+
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, autoMode]);
+
   const headerTitle = data?.name ? data.name : "MyFinanceLab";
   const headerSub =
     data?.symbol && !data?.error
@@ -376,8 +498,7 @@ export default function Home() {
   const synth = data && !data.error ? scoreFromData(data) : null;
 
   const perf = calcPerf(history);
-  const perfTone: Tone =
-    perf == null ? "orange" : perf > 0.08 ? "green" : perf < -0.08 ? "red" : "orange";
+  const perfTone = toneFromPerf(perf);
 
   const chartData = useMemo(() => {
     const labels = history.map((p) => p.date);
@@ -392,7 +513,6 @@ export default function Home() {
           tension: 0.35,
           pointRadius: 0,
           borderWidth: 2,
-          // (tu peux garder tes couleurs si tu veux, c’est déjà propre)
           borderColor: "rgba(120,170,255,1)",
           backgroundColor: "rgba(120,170,255,0.14)",
         },
@@ -444,12 +564,13 @@ export default function Home() {
     setRange(r);
     if (!symbol.trim()) return;
 
-    // recharge graph sans tout recharger
     setHistoryLoading(true);
     setHistoryError(null);
 
     try {
-      const histRes = await fetch(`/api/history?symbol=${encodeURIComponent(symbol.trim())}&range=${encodeURIComponent(r)}`);
+      const histRes = await fetch(
+        `/api/history?symbol=${encodeURIComponent(symbol.trim())}&range=${encodeURIComponent(r)}`
+      );
       const histJson = await histRes.json();
 
       if (!histRes.ok) {
@@ -464,8 +585,24 @@ export default function Home() {
     }
   };
 
+  // Tones (Key insights)
+  const peTone = toneFromPe(data?.pe);
+  const fcfTone = toneFromFCF(data?.freeCashFlow);
+  const marginTone = toneFromMargin(data?.netMargin);
+
+  const ndTone: Tone =
+    synth?.ndEbitda == null ? "orange" : synth.ndEbitda < 2 ? "green" : synth.ndEbitda < 4 ? "orange" : "red";
+
+  const lastFetchLabel =
+    lastFetchAt == null ? "—" : new Date(lastFetchAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+
   return (
     <>
+      {/* tiny animation helper (safe inline) */}
+      <style>{`
+        @keyframes flFadeIn { from { opacity: 0; transform: translateY(3px);} to { opacity: 1; transform: translateY(0);} }
+      `}</style>
+
       <div className="fl-bg-glow" />
       <div className="fl-container">
         {/* Topbar */}
@@ -490,19 +627,43 @@ export default function Home() {
             <NavLink href="/community" label="Notes" />
           </div>
 
-          <div className="fl-pill">
+          <div className="fl-pill" title="Dernière mise à jour (client)">
             <Dot tone="green" />
             <span>Local</span>
+            <span style={{ opacity: 0.7, marginLeft: 8 }}>· {lastFetchLabel}</span>
           </div>
         </div>
 
         {/* Hero */}
         <div className="fl-hero fl-glass">
-          <h1 className="fl-h1">Recherche d’entreprise</h1>
-          <p className="fl-lead">
-            Tape un <strong>ticker</strong> (ex : <code className="fl-code">AAPL</code>,{" "}
-            <code className="fl-code">MSFT</code>, <code className="fl-code">AIR.PA</code>) puis lance la recherche.
-          </p>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <div>
+              <h1 className="fl-h1" style={{ marginBottom: 6 }}>
+                Recherche d’entreprise
+              </h1>
+              <p className="fl-lead" style={{ marginTop: 0 }}>
+                Tape un <strong>ticker</strong> (ex : <code className="fl-code">AAPL</code>,{" "}
+                <code className="fl-code">MSFT</code>, <code className="fl-code">AIR.PA</code>) puis lance la recherche.
+              </p>
+            </div>
+
+            {/* mini controls */}
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <div className="fl-pill" title="Raccourci clavier">
+                <span style={{ fontWeight: 900 }}>⌘/Ctrl</span>
+                <span style={{ opacity: 0.85, marginLeft: 6 }}>K</span>
+              </div>
+
+              <button
+                className="fl-btn secondary"
+                onClick={() => setAutoMode((v) => !v)}
+                title="Auto = lance une recherche après ~1s d’inactivité pendant la saisie"
+                style={{ opacity: 0.98 }}
+              >
+                {autoMode ? "Auto: ON" : "Auto: OFF"}
+              </button>
+            </div>
+          </div>
 
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
             <Link href="/concept" className="fl-btn secondary">
@@ -514,42 +675,73 @@ export default function Home() {
           </div>
 
           <div style={{ display: "flex", gap: 12, alignItems: "stretch", flexWrap: "wrap" }}>
-            <div className="fl-input-wrap">
-              <div className="fl-input-label">Ticker</div>
+            <div className="fl-input-wrap" style={{ flex: "1 1 320px" }}>
+              <div className="fl-input-label" style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                <span>Ticker</span>
+                <span style={{ opacity: 0.65, fontSize: 12 }}>Entrée = lancer · ⌘/Ctrl+K = focus</span>
+              </div>
+
               <input
+                ref={inputRef}
                 value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
+                onChange={(e) => setSymbol(e.target.value.toUpperCase())}
                 onKeyDown={onKeyDown}
                 placeholder="Ex: AAPL"
                 className="fl-input"
+                style={{
+                  transition: "transform 160ms ease, box-shadow 160ms ease",
+                }}
               />
-              <div className="fl-input-hint">Astuce : Entrée pour lancer</div>
+              <div className="fl-input-hint">
+                Astuce : mets <strong>.PA</strong> pour Euronext Paris (ex : <code className="fl-code">AIR.PA</code>)
+              </div>
             </div>
 
-            <button className="fl-btn" onClick={fetchData} disabled={!canSearch || loading}>
+            <button className="fl-btn" onClick={() => fetchData()} disabled={!canSearch || loading}>
               {loading ? "Chargement…" : "Rechercher"}
             </button>
           </div>
 
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14 }}>
+          {/* Quick picks */}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
             {["AAPL", "MSFT", "NVDA", "TSLA", "AIR.PA"].map((s) => (
               <button
                 key={s}
                 className="fl-btn secondary"
                 onClick={() => {
                   setSymbol(s);
-                  setTimeout(fetchData, 0);
+                  setTimeout(() => fetchData(s), 0);
                 }}
               >
                 {s}
               </button>
             ))}
+
+            {recents.length > 0 && (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <span style={{ opacity: 0.6, fontSize: 12, marginLeft: 6 }}>Récents :</span>
+                {recents.map((s) => (
+                  <button
+                    key={s}
+                    className="fl-btn secondary"
+                    onClick={() => {
+                      setSymbol(s);
+                      setTimeout(() => fetchData(s), 0);
+                    }}
+                    title="Relancer"
+                    style={{ opacity: 0.98 }}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Errors */}
         {data?.error && (
-          <div className="fl-alert" ref={resultsRef}>
+          <div className="fl-alert" ref={resultsRef} style={{ animation: "flFadeIn 160ms ease" as any }}>
             <div className="fl-alert-title">Erreur</div>
             <div className="fl-alert-text">{data.error}</div>
             <div className="fl-alert-tip">Si tu vois “429 / quota”, c’est juste tes crédits API.</div>
@@ -558,7 +750,7 @@ export default function Home() {
 
         {/* Empty */}
         {!data && !loading && (
-          <div className="fl-empty" ref={resultsRef}>
+          <div className="fl-empty" ref={resultsRef} style={{ animation: "flFadeIn 160ms ease" as any }}>
             <div className="fl-empty-title">Aucune donnée affichée</div>
             <div className="fl-empty-text">Saisis un ticker et lance la recherche.</div>
           </div>
@@ -588,10 +780,62 @@ export default function Home() {
 
         {/* Results */}
         {data && !data.error && synth && (
-          <div className="fl-grid" ref={resultsRef}>
+          <div className="fl-grid" ref={resultsRef} style={{ animation: "flFadeIn 200ms ease" as any }}>
+            {/* KEY INSIGHTS */}
+            <div className="fl-card" style={{ gridColumn: "span 12" }}>
+              <div
+                className="fl-card-header"
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
+              >
+                <div className="fl-card-title">Key insights</div>
+                <div style={{ opacity: 0.7, fontSize: 12 }}>
+                  Résumé visuel · {data.symbol ?? "—"} · Range {range.toUpperCase()}
+                </div>
+              </div>
+
+              <div className="fl-card-body" style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div className="fl-pill" title="PER (valorisation)">
+                  <Dot tone={peTone} />
+                  <span style={{ fontWeight: 900 }}>PER</span>
+                  <span style={{ opacity: 0.85, marginLeft: 8 }}>{data.pe == null ? "—" : data.pe.toFixed(1)}</span>
+                </div>
+
+                <div className="fl-pill" title="Dette nette / EBITDA (risque)">
+                  <Dot tone={ndTone} />
+                  <span style={{ fontWeight: 900 }}>DN/EBITDA</span>
+                  <span style={{ opacity: 0.85, marginLeft: 8 }}>
+                    {synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
+                  </span>
+                </div>
+
+                <div className="fl-pill" title="Free Cash Flow">
+                  <Dot tone={fcfTone} />
+                  <span style={{ fontWeight: 900 }}>FCF</span>
+                  <span style={{ opacity: 0.85, marginLeft: 8 }}>{fmtMoneyCompact(data.freeCashFlow)}</span>
+                </div>
+
+                <div className="fl-pill" title="Marge nette">
+                  <Dot tone={marginTone} />
+                  <span style={{ fontWeight: 900 }}>Marge nette</span>
+                  <span style={{ opacity: 0.85, marginLeft: 8 }}>{fmtSignedPct(data.netMargin)}</span>
+                </div>
+
+                <div className="fl-pill" title="Performance sur la période sélectionnée">
+                  <Dot tone={perfTone} />
+                  <span style={{ fontWeight: 900 }}>Perf</span>
+                  <span style={{ opacity: 0.85, marginLeft: 8 }}>
+                    {perf == null ? "—" : fmtSignedPct(perf)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
             {/* SYNTHÈSE */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div
+                className="fl-card-header"
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
+              >
                 <div className="fl-card-title">Synthèse (automatique)</div>
                 <div className="fl-pill">
                   <Dot tone={synth.tone} />
@@ -649,7 +893,10 @@ export default function Home() {
 
             {/* GRAPH */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+              <div
+                className="fl-card-header"
+                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
+              >
                 <div className="fl-card-title">Prix (graphique)</div>
 
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
@@ -722,7 +969,10 @@ export default function Home() {
             <Card title="Bilan">
               <div className="fl-fields">
                 <Field label={<InfoTip k="totalDebt" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.totalDebt)} />
-                <Field label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.cashAndCashEquivalents)} />
+                <Field
+                  label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />}
+                  value={fmtMoneyCompact(data.cashAndCashEquivalents)}
+                />
                 <Field label="Capitaux propres" value={fmtMoneyCompact(data.totalEquity)} />
                 <Field label="Dette nette" value={fmtMoneyCompact(synth.netDebt)} sub="Dette - Cash" />
               </div>
@@ -741,15 +991,43 @@ export default function Home() {
             {/* Actus */}
             <Card title="Actualités récentes">
               <div style={{ display: "grid", gap: 12 }}>
-                {news.length === 0 && <div style={{ opacity: 0.65 }}>Aucune actualité trouvée.</div>}
-                {news.map((n, i) => (
-                  <a key={i} href={n.url} target="_blank" rel="noreferrer" className="fl-news">
-                    <div className="fl-news-title">{n.title}</div>
-                    <div className="fl-news-meta">
-                      {n.site} · {new Date(n.date).toLocaleDateString("fr-FR")}
-                    </div>
-                  </a>
-                ))}
+                {newsLoading && (
+                  <>
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="fl-skeleton" style={{ height: 58, borderRadius: 14 }} />
+                    ))}
+                  </>
+                )}
+
+                {!newsLoading && news.length === 0 && <div style={{ opacity: 0.65 }}>Aucune actualité trouvée.</div>}
+
+                {!newsLoading &&
+                  news.map((n, i) => (
+                    <a
+                      key={i}
+                      href={n.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="fl-news"
+                      style={{
+                        transition: "transform 170ms ease, box-shadow 170ms ease, border-color 170ms ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        (e.currentTarget as any).style.transform = "translateY(-2px)";
+                      }}
+                      onMouseLeave={(e) => {
+                        (e.currentTarget as any).style.transform = "translateY(0)";
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                        <div className="fl-news-title">{n.title}</div>
+                        <div style={{ opacity: 0.7, fontWeight: 900 }}>↗</div>
+                      </div>
+                      <div className="fl-news-meta">
+                        {n.site} · {new Date(n.date).toLocaleDateString("fr-FR")}
+                      </div>
+                    </a>
+                  ))}
               </div>
             </Card>
 
@@ -763,7 +1041,11 @@ export default function Home() {
               data.roa != null) && (
                 <Card title="Ratios (si disponibles)">
                   <div className="fl-fields">
-                    <Field label="PER (P/E)" value={data.pe != null ? String(data.pe.toFixed?.(2) ?? data.pe) : "—"} sub="Valorisation" />
+                    <Field
+                      label="PER (P/E)"
+                      value={data.pe != null ? String((data.pe as any).toFixed?.(2) ?? data.pe) : "—"}
+                      sub="Valorisation"
+                    />
                     <Field label="EPS" value={data.eps != null ? String(data.eps) : "—"} sub="Bénéfice par action" />
                     <Field label="P/B" value={data.pb != null ? String(data.pb) : "—"} />
                     <Field label="P/S" value={data.ps != null ? String(data.ps) : "—"} />
@@ -819,7 +1101,7 @@ export default function Home() {
 
         {/* Modal définitions */}
         {openKey && DEFINITIONS[openKey] && (
-          <div className="fl-overlay" onClick={() => setOpenKey(null)}>
+          <div className="fl-overlay" onClick={() => setOpenKey(null)} style={{ animation: "flFadeIn 140ms ease" as any }}>
             <div className="fl-modal" onClick={(e) => e.stopPropagation()}>
               <div className="fl-modal-title">{DEFINITIONS[openKey].title}</div>
               <div className="fl-modal-desc">{DEFINITIONS[openKey].desc}</div>
@@ -827,7 +1109,7 @@ export default function Home() {
               <div className="fl-modal-how">{DEFINITIONS[openKey].how}</div>
               {DEFINITIONS[openKey].warning && <div className="fl-modal-warn">{DEFINITIONS[openKey].warning}</div>}
               <button className="fl-modal-btn" onClick={() => setOpenKey(null)}>
-                Fermer
+                Fermer (Esc)
               </button>
             </div>
           </div>

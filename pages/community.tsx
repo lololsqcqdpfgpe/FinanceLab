@@ -1,6 +1,7 @@
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/router";
+import type { CSSProperties } from "react";
 
 /**
  * FinanceLab — Notes / MindMap (local + TTL 24h)
@@ -46,9 +47,7 @@ function now() {
 }
 
 function uid(prefix = "n") {
-    return `${prefix}_${Math.random().toString(16).slice(2)}_${Math.random()
-        .toString(16)
-        .slice(2)}`;
+    return `${prefix}_${Math.random().toString(16).slice(2)}_${Math.random().toString(16).slice(2)}`;
 }
 
 function clamp(n: number, min: number, max: number) {
@@ -69,42 +68,16 @@ function toneDotStyle(t: NodeTone): React.CSSProperties {
         borderRadius: 999,
         display: "inline-block",
         boxShadow: "0 0 0 6px rgba(255,255,255,0.04)",
+        flex: "0 0 auto",
     };
-    if (t === "good") return { ...base, background: "#22c55e" };
-    if (t === "mid") return { ...base, background: "#f59e0b" };
-    if (t === "bad") return { ...base, background: "#ef4444" };
-    return { ...base, background: "rgba(255,255,255,0.25)" };
+    if (t === "good") return { ...base, background: "#22c55e", boxShadow: "0 0 0 6px rgba(34,197,94,0.12)" };
+    if (t === "mid") return { ...base, background: "#f59e0b", boxShadow: "0 0 0 6px rgba(245,158,11,0.12)" };
+    if (t === "bad") return { ...base, background: "#ef4444", boxShadow: "0 0 0 6px rgba(239,68,68,0.12)" };
+    return { ...base, background: "rgba(255,255,255,0.25)", boxShadow: "0 0 0 6px rgba(255,255,255,0.06)" };
 }
 
 function sanitizeTitle(s: string) {
     return s.replace(/\s+/g, " ").trim().slice(0, 60);
-}
-
-function defaultState(seedTitle?: string): MindState {
-    const centerX = 520;
-    const centerY = 320;
-    const root: MindNode = {
-        id: uid("root"),
-        title: seedTitle ? sanitizeTitle(seedTitle) : "Nouvelle note",
-        body: "",
-        tone: "none",
-        x: centerX,
-        y: centerY,
-        createdAt: now(),
-        updatedAt: now(),
-    };
-
-    const createdAt = now();
-    return {
-        version: 1,
-        createdAt,
-        updatedAt: createdAt,
-        expiresAt: createdAt + TTL_MS,
-        nodes: [root],
-        edges: [],
-        selectedId: root.id,
-        viewport: { x: 0, y: 0, zoom: 1 },
-    };
 }
 
 function safeParseJSON<T>(s: string | null): T | null {
@@ -130,23 +103,47 @@ function setWithTTL(st: MindState): MindState {
     };
 }
 
+function defaultState(seedTitle?: string): MindState {
+    const centerX = 520;
+    const centerY = 320;
+
+    const createdAt = now();
+    const root: MindNode = {
+        id: uid("root"),
+        title: seedTitle ? sanitizeTitle(seedTitle) : "Nouvelle note",
+        body: "",
+        tone: "none",
+        x: centerX,
+        y: centerY,
+        createdAt,
+        updatedAt: createdAt,
+    };
+
+    return {
+        version: 1,
+        createdAt,
+        updatedAt: createdAt,
+        expiresAt: createdAt + TTL_MS,
+        nodes: [root],
+        edges: [],
+        selectedId: root.id,
+        viewport: { x: 0, y: 0, zoom: 1 },
+    };
+}
+
 /** auto arrange in a neat radial pattern around the root */
 function autoArrange(state: MindState): MindState {
     if (!state.nodes.length) return state;
     const root = state.nodes[0];
     const others = state.nodes.slice(1);
 
-    // group children-ish: nodes that have an incoming edge from root first
-    const rootChildrenIds = new Set(
-        state.edges.filter((e) => e.from === root.id).map((e) => e.to)
-    );
+    const rootChildrenIds = new Set(state.edges.filter((e) => e.from === root.id).map((e) => e.to));
     const rootChildren = others.filter((n) => rootChildrenIds.has(n.id));
     const rest = others.filter((n) => !rootChildrenIds.has(n.id));
 
     const placed: MindNode[] = [];
-
-    const radius1 = 200;
-    const radius2 = 360;
+    const radius1 = 210;
+    const radius2 = 370;
 
     const placeRing = (arr: MindNode[], radius: number, startAngle: number) => {
         const k = Math.max(arr.length, 1);
@@ -161,11 +158,7 @@ function autoArrange(state: MindState): MindState {
     placeRing(rootChildren, radius1, -Math.PI / 2);
     placeRing(rest, radius2, -Math.PI / 2 + 0.35);
 
-    return {
-        ...state,
-        nodes: [root, ...placed],
-        updatedAt: now(),
-    };
+    return { ...state, nodes: [root, ...placed], updatedAt: now() };
 }
 
 function getNode(state: MindState, id?: string) {
@@ -176,8 +169,6 @@ function getNode(state: MindState, id?: string) {
 function centerOnNode(state: MindState, id: string): MindState {
     const n = getNode(state, id);
     if (!n) return state;
-    // viewport shifts canvas; we center node in visible area using a stable target
-    // since we don't know real container size here, we aim for 520x320 virtual center
     const targetX = 520;
     const targetY = 320;
     return {
@@ -192,11 +183,7 @@ function centerOnNode(state: MindState, id: string): MindState {
     };
 }
 
-function buildTemplateAround(
-    state: MindState,
-    rootId: string,
-    anchorTitle?: string
-): MindState {
+function buildTemplateAround(state: MindState, rootId: string, anchorTitle?: string): MindState {
     const root = getNode(state, rootId);
     if (!root) return state;
 
@@ -209,10 +196,9 @@ function buildTemplateAround(
         { t: "News", body: "1–3 infos à retenir + impact sur la thèse.", tone: "none" as NodeTone },
     ];
 
-    const baseR = 230;
+    const baseR = 240;
     const startA = -Math.PI / 2;
 
-    let next = { ...state };
     const newNodes: MindNode[] = [];
     const newEdges: MindEdge[] = [];
 
@@ -235,26 +221,20 @@ function buildTemplateAround(
         newEdges.push({ id: uid("e"), from: root.id, to: nn.id });
     }
 
-    // Optional: rename root with anchorTitle
-    const nodes = next.nodes.map((n) =>
-        n.id === root.id && anchorTitle
-            ? { ...n, title: sanitizeTitle(anchorTitle), updatedAt: now() }
-            : n
+    const nodes = state.nodes.map((n) =>
+        n.id === root.id && anchorTitle ? { ...n, title: sanitizeTitle(anchorTitle), updatedAt: now() } : n
     );
 
-    next = {
-        ...next,
+    return {
+        ...state,
         nodes: [...nodes, ...newNodes],
-        edges: [...next.edges, ...newEdges],
+        edges: [...state.edges, ...newEdges],
         updatedAt: now(),
     };
-
-    return next;
 }
 
 function exportState(state: MindState) {
-    const payload = JSON.stringify(state, null, 2);
-    return payload;
+    return JSON.stringify(state, null, 2);
 }
 
 function importState(raw: string): MindState | null {
@@ -262,7 +242,6 @@ function importState(raw: string): MindState | null {
     if (!parsed) return null;
     if (!parsed.nodes || !Array.isArray(parsed.nodes)) return null;
     if (!parsed.edges || !Array.isArray(parsed.edges)) return null;
-    // refresh TTL on import
     return setWithTTL({
         ...parsed,
         version: 1,
@@ -279,11 +258,32 @@ function prettyTimeLeft(expiresAt: number) {
     return `${h} h ${m} min`;
 }
 
+function usePrefersReducedMotion() {
+    const [reduced, setReduced] = useState(false);
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+        const onChange = () => setReduced(!!mq.matches);
+        onChange();
+        mq.addEventListener?.("change", onChange);
+        return () => mq.removeEventListener?.("change", onChange);
+    }, []);
+    return reduced;
+}
+
+function snap(value: number, grid = 10) {
+    return Math.round(value / grid) * grid;
+}
+
 export default function Community() {
     const router = useRouter();
+    const reduced = usePrefersReducedMotion();
+
     const seedSymbol = typeof router.query.symbol === "string" ? router.query.symbol : "";
 
-    const [state, setState] = useState<MindState>(() => defaultState(seedSymbol ? `Notes: ${seedSymbol}` : undefined));
+    const [state, setState] = useState<MindState>(() =>
+        defaultState(seedSymbol ? `Notes: ${seedSymbol}` : undefined)
+    );
     const [hydrated, setHydrated] = useState(false);
 
     const [newTitle, setNewTitle] = useState("");
@@ -303,11 +303,11 @@ export default function Community() {
 
     // hydrate from localStorage
     useEffect(() => {
+        if (typeof window === "undefined") return;
         const saved = safeParseJSON<MindState>(localStorage.getItem(STORAGE_KEY));
         if (saved && !isExpired(saved)) {
             setState(saved);
         } else {
-            // if expired, reset cleanly
             const fresh = defaultState(seedSymbol ? `Notes: ${seedSymbol}` : undefined);
             localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
             setState(fresh);
@@ -316,7 +316,7 @@ export default function Community() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // if seedSymbol changes (rare), offer a nice behavior: rename root if still defaultish
+    // if seedSymbol changes, rename root if still defaultish
     useEffect(() => {
         if (!hydrated) return;
         if (!seedSymbol) return;
@@ -339,6 +339,7 @@ export default function Community() {
     useEffect(() => {
         if (!hydrated) return;
         const t = setTimeout(() => {
+            if (typeof window === "undefined") return;
             localStorage.setItem(STORAGE_KEY, JSON.stringify(setWithTTL(state)));
         }, 120);
         return () => clearTimeout(t);
@@ -363,12 +364,7 @@ export default function Community() {
     const filteredNodes = useMemo(() => {
         const q = search.trim().toLowerCase();
         if (!q) return state.nodes;
-        return state.nodes.filter((n) => {
-            return (
-                n.title.toLowerCase().includes(q) ||
-                n.body.toLowerCase().includes(q)
-            );
-        });
+        return state.nodes.filter((n) => n.title.toLowerCase().includes(q) || n.body.toLowerCase().includes(q));
     }, [state.nodes, search]);
 
     const edgeLines = useMemo(() => {
@@ -383,119 +379,147 @@ export default function Community() {
             .filter(Boolean) as { id: string; a: MindNode; b: MindNode }[];
     }, [state.edges, state.nodes]);
 
-    function select(id: string) {
+    const select = useCallback((id: string) => {
         setState((prev) => ({ ...prev, selectedId: id, updatedAt: now() }));
-    }
+    }, []);
 
-    function addNode(parentId?: string) {
-        const title = sanitizeTitle(newTitle) || "Nouvelle idée";
-        const base = parentId ? getNode(state, parentId) : state.nodes[0];
-        const bx = base?.x ?? 520;
-        const by = base?.y ?? 320;
+    const addNode = useCallback(
+        (parentId?: string) => {
+            const title = sanitizeTitle(newTitle) || "Nouvelle idée";
+            const base = parentId ? getNode(state, parentId) : state.nodes[0];
+            const bx = base?.x ?? 520;
+            const by = base?.y ?? 320;
 
-        const n: MindNode = {
-            id: uid("n"),
-            title,
-            body: "",
-            tone: "none",
-            x: bx + 220 + (Math.random() * 40 - 20),
-            y: by + (Math.random() * 120 - 60),
-            createdAt: now(),
-            updatedAt: now(),
-        };
-
-        setState((prev) => {
-            const next: MindState = {
-                ...prev,
-                nodes: [...prev.nodes, n],
-                selectedId: n.id,
+            const n: MindNode = {
+                id: uid("n"),
+                title,
+                body: "",
+                tone: "none",
+                x: bx + 220 + (Math.random() * 40 - 20),
+                y: by + (Math.random() * 120 - 60),
+                createdAt: now(),
                 updatedAt: now(),
             };
-            if (parentId) {
-                return {
-                    ...next,
-                    edges: [...next.edges, { id: uid("e"), from: parentId, to: n.id }],
+
+            setState((prev) => {
+                const next: MindState = {
+                    ...prev,
+                    nodes: [...prev.nodes, n],
+                    selectedId: n.id,
+                    updatedAt: now(),
                 };
-            }
-            return next;
-        });
+                if (parentId) {
+                    return { ...next, edges: [...next.edges, { id: uid("e"), from: parentId, to: n.id }] };
+                }
+                return next;
+            });
 
-        setNewTitle("");
-    }
+            setNewTitle("");
+        },
+        [newTitle, state]
+    );
 
-    function removeSelected() {
+    const removeSelected = useCallback(() => {
         const id = state.selectedId;
         if (!id) return;
-        // never delete root if it's the only node
         if (state.nodes.length === 1) return;
 
         setState((prev) => {
             const rootId = prev.nodes[0]?.id;
             const nextNodes = prev.nodes.filter((n) => n.id !== id);
             const nextEdges = prev.edges.filter((e) => e.from !== id && e.to !== id);
-            const nextSelected = id === rootId ? (nextNodes[0]?.id ?? undefined) : (rootId ?? nextNodes[0]?.id);
+            const nextSelected = id === rootId ? (nextNodes[0]?.id ?? undefined) : rootId ?? nextNodes[0]?.id;
             return { ...prev, nodes: nextNodes, edges: nextEdges, selectedId: nextSelected, updatedAt: now() };
         });
-    }
+    }, [state.selectedId, state.nodes.length]);
 
-    function updateSelected(patch: Partial<MindNode>) {
-        const id = state.selectedId;
-        if (!id) return;
-        setState((prev) => ({
-            ...prev,
-            nodes: prev.nodes.map((n) =>
-                n.id === id ? { ...n, ...patch, updatedAt: now() } : n
-            ),
-            updatedAt: now(),
-        }));
-    }
+    const updateSelected = useCallback(
+        (patch: Partial<MindNode>) => {
+            const id = state.selectedId;
+            if (!id) return;
+            setState((prev) => ({
+                ...prev,
+                nodes: prev.nodes.map((n) => (n.id === id ? { ...n, ...patch, updatedAt: now() } : n)),
+                updatedAt: now(),
+            }));
+        },
+        [state.selectedId]
+    );
 
-    function connectToRoot(id: string) {
-        const root = state.nodes[0];
-        if (!root) return;
-        // avoid duplicate edges
-        const exists = state.edges.some((e) => e.from === root.id && e.to === id);
-        if (exists) return;
-        setState((prev) => ({
-            ...prev,
-            edges: [...prev.edges, { id: uid("e"), from: root.id, to: id }],
-            updatedAt: now(),
-        }));
-    }
+    const connectToRoot = useCallback(
+        (id: string) => {
+            const root = state.nodes[0];
+            if (!root) return;
+            const exists = state.edges.some((e) => e.from === root.id && e.to === id);
+            if (exists) return;
+            setState((prev) => ({
+                ...prev,
+                edges: [...prev.edges, { id: uid("e"), from: root.id, to: id }],
+                updatedAt: now(),
+            }));
+        },
+        [state.nodes, state.edges]
+    );
 
-    function applyTemplate() {
+    const applyTemplate = useCallback(() => {
         const root = state.nodes[0];
         if (!root) return;
         setState((prev) => buildTemplateAround(prev, root.id, root.title));
-    }
+    }, [state.nodes]);
 
-    function resetAll() {
+    const resetAll = useCallback(() => {
         const fresh = defaultState(seedSymbol ? `Notes: ${seedSymbol}` : undefined);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
         setState(fresh);
-    }
+    }, [seedSymbol]);
 
-    function doAutoArrange() {
+    const doAutoArrange = useCallback(() => {
         setState((prev) => autoArrange(prev));
-    }
+    }, []);
 
-    function copyExport() {
+    const copyExport = useCallback(() => {
         const text = exportState(state);
         navigator.clipboard?.writeText(text);
-    }
+    }, [state]);
 
-    function doImport() {
+    const doImport = useCallback(() => {
         const st = importState(importText);
         if (!st) return;
         setState(st);
         localStorage.setItem(STORAGE_KEY, JSON.stringify(st));
         setImportOpen(false);
         setImportText("");
-    }
+    }, [importText]);
+
+    // keyboard shortcuts
+    useEffect(() => {
+        if (typeof window === "undefined") return;
+        const onKey = (e: KeyboardEvent) => {
+            const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase?.() ?? "";
+            const typing = tag === "input" || tag === "textarea";
+
+            if (e.key === "Escape") {
+                setImportOpen(false);
+            }
+
+            if (typing) return;
+
+            // focus / convenience
+            if (e.key.toLowerCase() === "n") addNode(state.selectedId ?? state.nodes[0]?.id);
+            if (e.key.toLowerCase() === "a") doAutoArrange();
+            if (e.key.toLowerCase() === "c") setState((p) => centerOnNode(p, p.selectedId ?? p.nodes[0]?.id ?? ""));
+            if (e.key.toLowerCase() === "t") applyTemplate();
+            if (e.key === "Backspace" || e.key === "Delete") removeSelected();
+            if (e.key === "0") setState((p) => ({ ...p, viewport: { ...p.viewport, zoom: 1 }, updatedAt: now() }));
+            if (e.key === "+" || e.key === "=") setState((p) => ({ ...p, viewport: { ...p.viewport, zoom: clamp(p.viewport.zoom * 1.08, 0.65, 1.8) }, updatedAt: now() }));
+            if (e.key === "-" || e.key === "_") setState((p) => ({ ...p, viewport: { ...p.viewport, zoom: clamp(p.viewport.zoom * 0.92, 0.65, 1.8) }, updatedAt: now() }));
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [addNode, applyTemplate, doAutoArrange, removeSelected, state.selectedId, state.nodes]);
 
     // panning & zoom
     function onCanvasMouseDown(e: React.MouseEvent) {
-        // Only pan if clicking empty canvas (not on nodes)
         if ((e.target as HTMLElement)?.dataset?.node === "1") return;
         setIsPanning(true);
         panRef.current = { sx: e.clientX, sy: e.clientY, vx: state.viewport.x, vy: state.viewport.y };
@@ -514,7 +538,12 @@ export default function Community() {
                 ...prev,
                 nodes: prev.nodes.map((n) =>
                     n.id === dragId
-                        ? { ...n, x: worldX - dragRef.current!.dx, y: worldY - dragRef.current!.dy, updatedAt: now() }
+                        ? {
+                            ...n,
+                            x: snap(worldX - dragRef.current!.dx, 8),
+                            y: snap(worldY - dragRef.current!.dy, 8),
+                            updatedAt: now(),
+                        }
                         : n
                 ),
                 updatedAt: now(),
@@ -541,18 +570,16 @@ export default function Community() {
 
     function onWheel(e: React.WheelEvent) {
         if (!canvasRef.current) return;
-        // Ctrl/trackpad: smoother; we allow standard wheel too
         e.preventDefault();
 
         const delta = -e.deltaY;
         const factor = delta > 0 ? 1.06 : 0.94;
-        const nextZoom = clamp(state.viewport.zoom * factor, 0.65, 1.6);
+        const nextZoom = clamp(state.viewport.zoom * factor, 0.65, 1.8);
 
         const rect = canvasRef.current.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
 
-        // keep the point under mouse stable
         const wx = (mx - state.viewport.x) / state.viewport.zoom;
         const wy = (my - state.viewport.y) / state.viewport.zoom;
 
@@ -579,19 +606,68 @@ export default function Community() {
         select(node.id);
     }
 
-    const headerTitle = "FinanceLab";
+    const headerTitle = "MyFinanceLab";
     const headerSub = "Notes (mindmap) — espace perso · conservation 24h";
 
     const timeLeft = prettyTimeLeft(state.expiresAt);
 
+    const rootId = state.nodes[0]?.id;
+    const canDelete = state.nodes.length > 1 && !!state.selectedId && state.selectedId !== rootId;
+
+    // minimap (simple)
+    const minimap = useMemo(() => {
+        const nodes = state.nodes;
+        if (!nodes.length) return null;
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const n of nodes) {
+            minX = Math.min(minX, n.x);
+            minY = Math.min(minY, n.y);
+            maxX = Math.max(maxX, n.x);
+            maxY = Math.max(maxY, n.y);
+        }
+        const pad = 40;
+        minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+        const w = Math.max(1, maxX - minX);
+        const h = Math.max(1, maxY - minY);
+
+        return { minX, minY, w, h };
+    }, [state.nodes]);
+
     return (
         <div style={styles.page}>
+            <style jsx global>{`
+        .flx-hoverlift {
+          transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+        }
+        .flx-hoverlift:hover {
+          transform: translateY(-1px);
+        }
+        .flx-btn:hover { transform: translateY(-1px); }
+        .flx-btn { transition: transform 160ms ease, filter 160ms ease; }
+        .flx-card {
+          transition: transform 180ms ease, border-color 180ms ease, background 180ms ease;
+        }
+        .flx-node {
+          will-change: transform;
+        }
+        @keyframes flx-pop {
+          from { transform: translateY(6px) scale(0.98); opacity: 0; }
+          to { transform: translateY(0px) scale(1); opacity: 1; }
+        }
+        @keyframes flx-softpulse {
+          0% { box-shadow: 0 0 0 0 rgba(99,102,241,0.0); }
+          50% { box-shadow: 0 0 0 10px rgba(99,102,241,0.12); }
+          100% { box-shadow: 0 0 0 0 rgba(99,102,241,0.0); }
+        }
+      `}</style>
+
             <div style={styles.bgGlow} />
             <div style={styles.container}>
                 {/* Topbar */}
                 <div style={styles.topbar}>
                     <div style={styles.brand}>
-                        <div style={styles.logo}>FL</div>
+                        <div style={styles.logo}>MFL</div>
                         <div>
                             <div style={styles.brandTitle}>{headerTitle}</div>
                             <div style={styles.brandSub}>{headerSub}</div>
@@ -599,35 +675,47 @@ export default function Community() {
                     </div>
 
                     <div style={styles.nav}>
-                        <Link href="/" style={styles.navLink}>Dashboard</Link>
-                        <Link href="/concept" style={styles.navLink}>Concept</Link>
-                        <Link href="/community" style={{ ...styles.navLink, ...styles.navLinkActive }}>Notes</Link>
+                        <Link href="/" style={styles.navLink} className="flx-hoverlift">
+                            Dashboard
+                        </Link>
+                        <Link href="/concept" style={styles.navLink} className="flx-hoverlift">
+                            Concept
+                        </Link>
+                        <Link href="/community" style={{ ...styles.navLink, ...styles.navLinkActive }}>
+                            Notes
+                        </Link>
                     </div>
 
-                    <div style={styles.pill}>
+                    <div style={styles.pill} title="Données locales (navigateur)">
                         <span style={styles.pillDot} />
-                        <span>En ligne</span>
+                        <span>Local</span>
                     </div>
                 </div>
 
-                {/* Hero actions */}
+                {/* Hero */}
                 <div style={styles.hero}>
                     <div style={styles.heroTop}>
                         <div>
                             <h1 style={styles.h1}>Notes — MindMap</h1>
                             <p style={styles.lead}>
-                                Un espace pour <strong>capturer</strong> et <strong>structurer</strong> tes idées (1 entreprise, 1 thèse, 3 risques, 2 catalyseurs…).
-                                Les notes sont gardées <strong>24 heures</strong>, puis se réinitialisent.
+                                Un espace pour <strong>capturer</strong> et <strong>structurer</strong> tes idées (thèse, risques,
+                                catalyseurs, valorisation, technique…). Les notes sont gardées <strong>24 heures</strong>, puis reset.
                             </p>
+
+                            <div style={styles.hotkeys}>
+                                <span style={styles.hk}>N</span> Ajouter · <span style={styles.hk}>T</span> Template ·{" "}
+                                <span style={styles.hk}>A</span> Arrange · <span style={styles.hk}>C</span> Centrer ·{" "}
+                                <span style={styles.hk}>Del</span> Supprimer
+                            </div>
                         </div>
 
                         <div style={styles.heroMeta}>
-                            <div style={styles.metaCard}>
+                            <div style={styles.metaCard} className="flx-card">
                                 <div style={styles.metaLabel}>Expiration</div>
                                 <div style={styles.metaValue}>{timeLeft}</div>
                                 <div style={styles.metaSub}>Reset automatique</div>
                             </div>
-                            <div style={styles.metaCard}>
+                            <div style={styles.metaCard} className="flx-card">
                                 <div style={styles.metaLabel}>Zoom</div>
                                 <div style={styles.metaValue}>{Math.round(state.viewport.zoom * 100)}%</div>
                                 <div style={styles.metaSub}>Molette / trackpad</div>
@@ -636,7 +724,7 @@ export default function Community() {
                     </div>
 
                     <div style={styles.actionsRow}>
-                        <div style={styles.addBox}>
+                        <div style={styles.addBox} className="flx-card">
                             <div style={styles.addLabel}>Créer une bulle</div>
                             <input
                                 value={newTitle}
@@ -647,26 +735,28 @@ export default function Community() {
                                     if (e.key === "Enter") addNode(state.selectedId ?? state.nodes[0]?.id);
                                 }}
                             />
-                            <div style={styles.addHint}>
-                                Entrée = ajoute en enfant de la bulle sélectionnée
-                            </div>
+                            <div style={styles.addHint}>Entrée = ajoute en enfant de la bulle sélectionnée</div>
                         </div>
 
                         <div style={styles.btnCol}>
-                            <button style={styles.primaryBtn} onClick={() => addNode(state.selectedId ?? state.nodes[0]?.id)}>
+                            <button
+                                style={styles.primaryBtn}
+                                className="flx-btn"
+                                onClick={() => addNode(state.selectedId ?? state.nodes[0]?.id)}
+                            >
                                 Ajouter
                             </button>
 
-                            <button style={styles.secondaryBtn} onClick={applyTemplate}>
+                            <button style={styles.secondaryBtn} className="flx-btn" onClick={applyTemplate}>
                                 Template analyse
                             </button>
 
-                            <button style={styles.secondaryBtn} onClick={doAutoArrange}>
+                            <button style={styles.secondaryBtn} className="flx-btn" onClick={doAutoArrange}>
                                 Auto-arrange
                             </button>
                         </div>
 
-                        <div style={styles.searchBox}>
+                        <div style={styles.searchBox} className="flx-card">
                             <div style={styles.addLabel}>Rechercher</div>
                             <input
                                 value={search}
@@ -685,8 +775,8 @@ export default function Community() {
                             <button
                                 key={s}
                                 style={styles.chip}
+                                className="flx-hoverlift"
                                 onClick={() => {
-                                    // rename root and center
                                     setState((prev) => {
                                         const root = prev.nodes[0];
                                         if (!root) return prev;
@@ -707,16 +797,21 @@ export default function Community() {
 
                         <div style={{ flex: 1 }} />
 
-                        <button style={styles.ghostBtn} onClick={() => setState((p) => centerOnNode(p, p.nodes[0]?.id ?? ""))}>
+                        <button
+                            style={styles.ghostBtn}
+                            className="flx-hoverlift"
+                            onClick={() => setState((p) => centerOnNode(p, p.selectedId ?? p.nodes[0]?.id ?? ""))}
+                            title="Raccourci: C"
+                        >
                             Centrer
                         </button>
-                        <button style={styles.ghostBtn} onClick={() => setImportOpen(true)}>
+                        <button style={styles.ghostBtn} className="flx-hoverlift" onClick={() => setImportOpen(true)}>
                             Import
                         </button>
-                        <button style={styles.ghostBtn} onClick={copyExport}>
+                        <button style={styles.ghostBtn} className="flx-hoverlift" onClick={copyExport}>
                             Export
                         </button>
-                        <button style={styles.dangerBtn} onClick={resetAll}>
+                        <button style={styles.dangerBtn} className="flx-hoverlift" onClick={resetAll}>
                             Reset
                         </button>
                     </div>
@@ -727,40 +822,59 @@ export default function Community() {
                     {/* Canvas */}
                     <div
                         ref={canvasRef}
-                        style={styles.canvas}
+                        style={{
+                            ...styles.canvas,
+                            cursor: dragId ? "grabbing" : isPanning ? "grabbing" : "grab",
+                        }}
                         onMouseDown={onCanvasMouseDown}
                         onMouseMove={onCanvasMouseMove}
                         onMouseUp={onCanvasMouseUp}
                         onMouseLeave={onCanvasMouseUp}
                         onWheel={onWheel}
                     >
+                        {/* subtle grid */}
+                        <div style={styles.gridOverlay} />
+
                         {/* Edge layer (SVG) */}
                         <svg style={styles.svgLayer}>
                             {edgeLines.map(({ id, a, b }) => {
-                                const ax = (a.x * state.viewport.zoom) + state.viewport.x;
-                                const ay = (a.y * state.viewport.zoom) + state.viewport.y;
-                                const bx = (b.x * state.viewport.zoom) + state.viewport.x;
-                                const by = (b.y * state.viewport.zoom) + state.viewport.y;
+                                const ax = a.x * state.viewport.zoom + state.viewport.x;
+                                const ay = a.y * state.viewport.zoom + state.viewport.y;
+                                const bx = b.x * state.viewport.zoom + state.viewport.x;
+                                const by = b.y * state.viewport.zoom + state.viewport.y;
 
                                 const selected = state.selectedId === a.id || state.selectedId === b.id;
+
+                                // simple "glow" by drawing 2 lines
                                 return (
-                                    <line
-                                        key={id}
-                                        x1={ax}
-                                        y1={ay}
-                                        x2={bx}
-                                        y2={by}
-                                        stroke={selected ? "rgba(99,102,241,0.7)" : "rgba(255,255,255,0.14)"}
-                                        strokeWidth={selected ? 2.2 : 1.4}
-                                    />
+                                    <g key={id}>
+                                        <line
+                                            x1={ax}
+                                            y1={ay}
+                                            x2={bx}
+                                            y2={by}
+                                            stroke={selected ? "rgba(99,102,241,0.24)" : "rgba(255,255,255,0.07)"}
+                                            strokeWidth={selected ? 6 : 3.5}
+                                            strokeLinecap="round"
+                                        />
+                                        <line
+                                            x1={ax}
+                                            y1={ay}
+                                            x2={bx}
+                                            y2={by}
+                                            stroke={selected ? "rgba(99,102,241,0.75)" : "rgba(255,255,255,0.14)"}
+                                            strokeWidth={selected ? 2.2 : 1.4}
+                                            strokeLinecap="round"
+                                        />
+                                    </g>
                                 );
                             })}
                         </svg>
 
                         {/* Nodes */}
                         {filteredNodes.map((n) => {
-                            const x = (n.x * state.viewport.zoom) + state.viewport.x;
-                            const y = (n.y * state.viewport.zoom) + state.viewport.y;
+                            const x = n.x * state.viewport.zoom + state.viewport.x;
+                            const y = n.y * state.viewport.zoom + state.viewport.y;
                             const isSel = state.selectedId === n.id;
                             const isHover = hoverId === n.id;
 
@@ -768,11 +882,13 @@ export default function Community() {
                                 <div
                                     key={n.id}
                                     data-node="1"
+                                    className="flx-node"
                                     style={{
                                         ...styles.node,
                                         ...(isSel ? styles.nodeSelected : {}),
-                                        transform: `translate(${x - 90}px, ${y - 34}px) scale(${isSel ? 1.02 : 1})`,
+                                        transform: `translate(${x - 90}px, ${y - 34}px) scale(${isSel ? 1.03 : 1})`,
                                         opacity: isHover || isSel ? 1 : 0.94,
+                                        animation: !reduced && isSel ? "flx-softpulse 900ms ease-out" : "none",
                                     }}
                                     onMouseEnter={() => setHoverId(n.id)}
                                     onMouseLeave={() => setHoverId(null)}
@@ -793,8 +909,37 @@ export default function Community() {
                                             : "Clique pour écrire…"}
                                     </div>
 
+                                    {/* quick actions */}
+                                    <div style={styles.nodeActions}>
+                                        <button
+                                            type="button"
+                                            style={styles.nodeMiniBtn}
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                addNode(n.id);
+                                            }}
+                                            title="Ajouter un enfant"
+                                        >
+                                            +
+                                        </button>
+                                        <button
+                                            type="button"
+                                            style={styles.nodeMiniBtn}
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                connectToRoot(n.id);
+                                            }}
+                                            title="Lier au centre"
+                                            disabled={n.id === rootId}
+                                        >
+                                            ⤴
+                                        </button>
+                                    </div>
+
                                     {/* Hover preview */}
-                                    {(isHover && !isSel) && (
+                                    {isHover && !isSel && (
                                         <div style={styles.hoverCard}>
                                             <div style={styles.hoverTitle}>{n.title}</div>
                                             <div style={styles.hoverText}>
@@ -806,6 +951,59 @@ export default function Community() {
                                 </div>
                             );
                         })}
+
+                        {/* Minimap */}
+                        {minimap && (
+                            <div style={styles.minimapWrap}>
+                                <div style={styles.minimapTitle}>Map</div>
+                                <svg width={140} height={110} style={{ display: "block" }}>
+                                    {/* viewport rect */}
+                                    {(() => {
+                                        const vw = 520; // virtual view width approximation
+                                        const vh = 320; // virtual view height approximation
+                                        const worldLeft = (-state.viewport.x) / state.viewport.zoom;
+                                        const worldTop = (-state.viewport.y) / state.viewport.zoom;
+
+                                        const scaleX = 140 / minimap.w;
+                                        const scaleY = 110 / minimap.h;
+
+                                        const rx = (worldLeft - minimap.minX) * scaleX;
+                                        const ry = (worldTop - minimap.minY) * scaleY;
+                                        const rw = (vw / state.viewport.zoom) * scaleX;
+                                        const rh = (vh / state.viewport.zoom) * scaleY;
+
+                                        return (
+                                            <rect
+                                                x={rx}
+                                                y={ry}
+                                                width={rw}
+                                                height={rh}
+                                                fill="rgba(99,102,241,0.10)"
+                                                stroke="rgba(99,102,241,0.55)"
+                                                strokeWidth={1}
+                                                rx={6}
+                                            />
+                                        );
+                                    })()}
+
+                                    {/* nodes */}
+                                    {state.nodes.map((n) => {
+                                        const sx = ((n.x - minimap.minX) / minimap.w) * 140;
+                                        const sy = ((n.y - minimap.minY) / minimap.h) * 110;
+                                        const sel = n.id === state.selectedId;
+                                        return (
+                                            <circle
+                                                key={n.id}
+                                                cx={sx}
+                                                cy={sy}
+                                                r={sel ? 3.2 : 2.2}
+                                                fill={sel ? "rgba(56,189,248,0.95)" : "rgba(255,255,255,0.55)"}
+                                            />
+                                        );
+                                    })}
+                                </svg>
+                            </div>
+                        )}
                     </div>
 
                     {/* Side panel */}
@@ -858,6 +1056,8 @@ export default function Community() {
                                                         ...styles.toneBtn,
                                                         ...(active ? styles.toneBtnActive : {}),
                                                     }}
+                                                    className="flx-hoverlift"
+                                                    type="button"
                                                 >
                                                     <span style={toneDotStyle(t)} />
                                                     <span>{toneLabel(t)}</span>
@@ -880,23 +1080,29 @@ export default function Community() {
                                 <div style={styles.panelBtns}>
                                     <button
                                         style={styles.secondaryBtnWide}
+                                        className="flx-btn"
                                         onClick={() => addNode(selected.id)}
+                                        type="button"
                                     >
                                         Ajouter un enfant
                                     </button>
 
                                     <button
                                         style={styles.secondaryBtnWide}
+                                        className="flx-btn"
                                         onClick={() => connectToRoot(selected.id)}
-                                        disabled={selected.id === state.nodes[0]?.id}
+                                        disabled={selected.id === rootId}
+                                        type="button"
                                     >
                                         Lier au centre
                                     </button>
 
                                     <button
                                         style={styles.dangerBtnWide}
+                                        className="flx-btn"
                                         onClick={removeSelected}
-                                        disabled={state.nodes.length <= 1}
+                                        disabled={!canDelete}
+                                        type="button"
                                     >
                                         Supprimer
                                     </button>
@@ -917,9 +1123,7 @@ export default function Community() {
                     <div style={modalStyles.overlay} onClick={() => setImportOpen(false)}>
                         <div style={modalStyles.modal} onClick={(e) => e.stopPropagation()}>
                             <div style={modalStyles.title}>Import</div>
-                            <div style={modalStyles.desc}>
-                                Colle un export JSON ici (ça remplace la mindmap actuelle).
-                            </div>
+                            <div style={modalStyles.desc}>Colle un export JSON ici (ça remplace la mindmap actuelle).</div>
 
                             <textarea
                                 style={modalStyles.textarea}
@@ -929,10 +1133,16 @@ export default function Community() {
                             />
 
                             <div style={modalStyles.row}>
-                                <button style={modalStyles.btnSoft} onClick={() => setImportOpen(false)}>
+                                <button style={modalStyles.btnSoft} className="flx-btn" onClick={() => setImportOpen(false)} type="button">
                                     Annuler
                                 </button>
-                                <button style={modalStyles.btn} onClick={doImport} disabled={!importText.trim()}>
+                                <button
+                                    style={modalStyles.btn}
+                                    className="flx-btn"
+                                    onClick={doImport}
+                                    disabled={!importText.trim()}
+                                    type="button"
+                                >
                                     Importer
                                 </button>
                             </div>
@@ -943,12 +1153,10 @@ export default function Community() {
                 {/* Footer */}
                 <div style={styles.footer}>
                     <div style={styles.footerLeft}>
-                        <span style={styles.footerBadge}>FinanceLab</span>
+                        <span style={styles.footerBadge}>MyFinanceLab</span>
                         <span style={{ opacity: 0.7 }}>· Notes personnelles (24h)</span>
                     </div>
-                    <div style={{ opacity: 0.55 }}>
-                        Tip: Drag & drop · Molette = zoom · Vide = pan
-                    </div>
+                    <div style={{ opacity: 0.55 }}>Tip: Drag & drop · Molette = zoom · Vide = pan</div>
                 </div>
             </div>
         </div>
@@ -986,7 +1194,8 @@ const modalStyles: Record<string, React.CSSProperties> = {
         color: "#EAF0FF",
         padding: 12,
         outline: "none",
-        fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
+        fontFamily:
+            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace",
         fontSize: 12,
         lineHeight: 1.55,
     },
@@ -1013,7 +1222,7 @@ const modalStyles: Record<string, React.CSSProperties> = {
     },
 };
 
-const styles: Record<string, React.CSSProperties> = {
+const styles: Record<string, CSSProperties> = {
     page: {
         minHeight: "100vh",
         background: "#0B1020",
@@ -1043,13 +1252,13 @@ const styles: Record<string, React.CSSProperties> = {
     },
     brand: { display: "flex", alignItems: "center", gap: 12 },
     logo: {
-        width: 40,
-        height: 40,
-        borderRadius: 12,
+        width: 44,
+        height: 44,
+        borderRadius: 14,
         display: "grid",
         placeItems: "center",
-        fontWeight: 900,
-        letterSpacing: 0.5,
+        fontWeight: 950,
+        letterSpacing: 0.4,
         background: "linear-gradient(135deg, rgba(99,102,241,0.9), rgba(16,185,129,0.7))",
         color: "#07101F",
     },
@@ -1081,7 +1290,7 @@ const styles: Record<string, React.CSSProperties> = {
         background: "rgba(255,255,255,0.06)",
         border: "1px solid rgba(255,255,255,0.08)",
         fontSize: 12,
-        fontWeight: 800,
+        fontWeight: 900,
     },
     pillDot: {
         width: 8,
@@ -1113,7 +1322,27 @@ const styles: Record<string, React.CSSProperties> = {
     metaSub: { marginTop: 4, fontSize: 12, opacity: 0.6 },
 
     h1: { margin: 0, fontSize: 28, letterSpacing: -0.4 },
-    lead: { marginTop: 10, marginBottom: 0, opacity: 0.85, lineHeight: 1.5, maxWidth: 720 },
+    lead: { marginTop: 10, marginBottom: 0, opacity: 0.85, lineHeight: 1.5, maxWidth: 760 },
+
+    hotkeys: {
+        marginTop: 12,
+        opacity: 0.72,
+        fontSize: 12,
+        display: "flex",
+        gap: 10,
+        flexWrap: "wrap",
+        alignItems: "center",
+    },
+    hk: {
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "2px 8px",
+        borderRadius: 10,
+        border: "1px solid rgba(255,255,255,0.12)",
+        background: "rgba(0,0,0,0.22)",
+        fontWeight: 900,
+    },
 
     actionsRow: {
         marginTop: 14,
@@ -1216,7 +1445,15 @@ const styles: Record<string, React.CSSProperties> = {
         border: "1px solid rgba(255,255,255,0.08)",
         background: "rgba(255,255,255,0.03)",
         overflow: "hidden",
-        cursor: "grab",
+    },
+    gridOverlay: {
+        position: "absolute",
+        inset: 0,
+        pointerEvents: "none",
+        backgroundImage:
+            "linear-gradient(rgba(255,255,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.06) 1px, transparent 1px)",
+        backgroundSize: "44px 44px",
+        opacity: 0.10,
     },
     svgLayer: {
         position: "absolute",
@@ -1246,6 +1483,23 @@ const styles: Record<string, React.CSSProperties> = {
     nodeTitle: { fontWeight: 950, letterSpacing: -0.2, lineHeight: 1.15 },
     nodeSub: { marginTop: 8, opacity: 0.72, fontSize: 12, lineHeight: 1.35 },
 
+    nodeActions: {
+        marginTop: 10,
+        display: "flex",
+        gap: 8,
+        opacity: 0.85,
+    },
+    nodeMiniBtn: {
+        width: 34,
+        height: 30,
+        borderRadius: 12,
+        border: "1px solid rgba(255,255,255,0.12)",
+        background: "rgba(255,255,255,0.06)",
+        color: "#EAF0FF",
+        fontWeight: 950,
+        cursor: "pointer",
+    },
+
     hoverCard: {
         position: "absolute",
         left: "100%",
@@ -1259,10 +1513,32 @@ const styles: Record<string, React.CSSProperties> = {
         backdropFilter: "blur(10px)",
         boxShadow: "0 18px 60px rgba(0,0,0,0.35)",
         pointerEvents: "none",
+        animation: "flx-pop 140ms ease-out",
     },
     hoverTitle: { fontWeight: 950, marginBottom: 6 },
     hoverText: { opacity: 0.86, fontSize: 12, lineHeight: 1.5 },
     hoverHint: { marginTop: 10, opacity: 0.65, fontSize: 11 },
+
+    minimapWrap: {
+        position: "absolute",
+        right: 12,
+        bottom: 12,
+        width: 160,
+        borderRadius: 16,
+        border: "1px solid rgba(255,255,255,0.10)",
+        background: "rgba(0,0,0,0.28)",
+        backdropFilter: "blur(10px)",
+        padding: 10,
+        boxShadow: "0 18px 60px rgba(0,0,0,0.28)",
+        pointerEvents: "none",
+    },
+    minimapTitle: {
+        fontSize: 11,
+        opacity: 0.75,
+        fontWeight: 900,
+        marginBottom: 8,
+        letterSpacing: 0.2,
+    },
 
     panel: {
         borderRadius: 18,
