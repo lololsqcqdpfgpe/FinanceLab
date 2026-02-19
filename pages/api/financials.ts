@@ -5,12 +5,12 @@ type ApiData = {
     error?: string;
 
     symbol?: string;
-    name?: string;
-    exchange?: string;
-    sector?: string;
-    industry?: string;
-    country?: string;
-    description?: string;
+    name?: string | null;
+    exchange?: string | null;
+    sector?: string | null;
+    industry?: string | null;
+    country?: string | null;
+    description?: string | null;
 
     price?: number | null;
     marketCap?: number | null;
@@ -20,9 +20,9 @@ type ApiData = {
     yearLow?: number | null;
     yearHigh?: number | null;
 
-    period?: string | null;
+    period?: string | null; // ✅
     revenue?: number | null;
-    ebitda?: number | null;
+    ebitda?: number | null; // ✅
     operatingIncome?: number | null;
     netIncome?: number | null;
 
@@ -49,16 +49,8 @@ function toNum(x: any): number | null {
     const n = Number(x);
     return Number.isFinite(n) ? n : null;
 }
-function pickFirstString(x: any): string | null {
+function pickStr(x: any): string | null {
     return typeof x === "string" && x.trim() ? x.trim() : null;
-}
-
-function extractErrMessage(payload: any): string | null {
-    if (!payload) return null;
-    if (typeof payload === "string") return payload;
-    if (typeof payload?.error === "string") return payload.error;
-    if (typeof payload?.message === "string") return payload.message;
-    return null;
 }
 
 async function fetchJson(url: string) {
@@ -73,7 +65,7 @@ async function fetchJson(url: string) {
     return { ok: r.ok, status: r.status, json, text };
 }
 
-// Finnhub financials-reported: report.ic / report.bs / report.cf
+// report.ic / report.bs / report.cf (concept/value)
 function getFromReport(report: any, blocks: ("ic" | "bs" | "cf")[], concepts: string[]): number | null {
     if (!report) return null;
     for (const b of blocks) {
@@ -81,12 +73,25 @@ function getFromReport(report: any, blocks: ("ic" | "bs" | "cf")[], concepts: st
         if (!Array.isArray(arr)) continue;
         for (const c of concepts) {
             const row = arr.find((x: any) => x?.concept === c);
-            const v = row?.value;
-            const n = toNum(v);
+            const n = toNum(row?.value);
             if (n != null) return n;
         }
     }
     return null;
+}
+
+function pickLatestReport(finJson: any) {
+    const data = Array.isArray(finJson?.data) ? finJson.data : [];
+    if (!data.length) return null;
+
+    // ✅ trie par reportDate/filingDate desc
+    const sorted = [...data].sort((a, b) => {
+        const da = Date.parse(a?.reportDate ?? a?.filingDate ?? "");
+        const db = Date.parse(b?.reportDate ?? b?.filingDate ?? "");
+        return (Number.isFinite(db) ? db : 0) - (Number.isFinite(da) ? da : 0);
+    });
+
+    return sorted[0];
 }
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse<ApiData>) {
@@ -99,13 +104,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     if (!symbol) return res.status(400).json({ error: "Missing symbol" });
 
     const apiKey = process.env.FINNHUB_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing FINNHUB_API_KEY (Vercel env var)" });
+    if (!apiKey) return res.status(500).json({ error: "Missing FINNHUB_API_KEY" });
 
     const base = "https://finnhub.io/api/v1";
     const q = (path: string) => `${base}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(apiKey)}`;
 
     try {
-        // ✅ Appels
         const [quoteR, profR, metR, finR] = await Promise.all([
             fetchJson(q(`/quote?symbol=${encodeURIComponent(symbol)}`)),
             fetchJson(q(`/stock/profile2?symbol=${encodeURIComponent(symbol)}`)),
@@ -113,32 +117,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
             fetchJson(q(`/stock/financials-reported?symbol=${encodeURIComponent(symbol)}&freq=annual`)),
         ]);
 
-        // ✅ Gestion erreurs quota / token invalide
-        const errMsg =
-            extractErrMessage(quoteR.json) ||
-            extractErrMessage(profR.json) ||
-            extractErrMessage(metR.json) ||
-            extractErrMessage(finR.json);
-
-        const any429 = [quoteR, profR, metR, finR].some((x) => x.status === 429);
-        if (any429) {
+        // quota
+        if ([quoteR, profR, metR, finR].some((x) => x.status === 429)) {
             res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=120");
             return res.status(200).json({ error: "Quota Finnhub atteint (429). Attends 1 minute et réessaie." });
-        }
-
-        // Si Finnhub renvoie une erreur texte même avec status 200 parfois
-        if (errMsg && /limit|quota|rate|token|api key/i.test(errMsg)) {
-            res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=120");
-            return res.status(200).json({ error: `Erreur Finnhub: ${errMsg}` });
         }
 
         const quote = quoteR.ok ? quoteR.json : null;
         const profile = profR.ok ? profR.json : null;
         const metric = metR.ok ? metR.json?.metric : null;
 
-        const firstReport =
-            Array.isArray(finR.json?.data) && finR.json.data.length ? finR.json.data[0] : null;
-        const report = firstReport?.report ?? null;
+        const latest = pickLatestReport(finR.json);
+        const report = latest?.report ?? null;
+
+        // ✅ period : on prend reportDate puis filingDate, sinon fallback year
+        const period =
+            pickStr(latest?.reportDate) ??
+            pickStr(latest?.filingDate) ??
+            (latest?.year ? String(latest.year) : null);
 
         // Market
         const price = toNum(quote?.c);
@@ -160,26 +156,68 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
         const operatingMargin = toNum(metric?.operatingMarginTTM);
         const netMargin = toNum(metric?.netMarginTTM);
 
-        // Financials (annual latest)
-        const revenue = getFromReport(report, ["ic"], ["us-gaap_Revenues", "ifrs-full_Revenue"]);
-        const ebitda = getFromReport(report, ["ic"], [
-            "us-gaap_EarningsBeforeInterestTaxesDepreciationAmortization",
-            "ifrs-full_EBITDA",
+        // Income statement (annual latest)
+        const revenue = getFromReport(report, ["ic"], [
+            "us-gaap_Revenues",
+            "us-gaap_SalesRevenueNet",
+            "ifrs-full_Revenue",
         ]);
-        const operatingIncome = getFromReport(report, ["ic"], ["us-gaap_OperatingIncomeLoss", "ifrs-full_OperatingProfitLoss"]);
-        const netIncome = getFromReport(report, ["ic"], ["us-gaap_NetIncomeLoss", "ifrs-full_ProfitLoss"]);
 
-        const totalDebt = getFromReport(report, ["bs"], ["us-gaap_Debt", "us-gaap_LongTermDebt", "ifrs-full_Borrowings"]);
+        const operatingIncome = getFromReport(report, ["ic"], [
+            "us-gaap_OperatingIncomeLoss",
+            "ifrs-full_OperatingProfitLoss",
+        ]);
+
+        const netIncome = getFromReport(report, ["ic"], [
+            "us-gaap_NetIncomeLoss",
+            "us-gaap_ProfitLoss",
+            "ifrs-full_ProfitLoss",
+        ]);
+
+        // ✅ D&A (pour calculer EBITDA si besoin)
+        const depreciationAmortization = getFromReport(report, ["cf", "ic"], [
+            "us-gaap_DepreciationDepletionAndAmortization",
+            "us-gaap_DepreciationAndAmortization",
+            "ifrs-full_DepreciationAmortisationImpairmentExpense",
+        ]);
+
+        // ✅ EBITDA : d’abord report direct, sinon fallback
+        let ebitda =
+            getFromReport(report, ["ic"], [
+                "us-gaap_EarningsBeforeInterestTaxesDepreciationAmortization",
+                "ifrs-full_EBITDA",
+            ]) ??
+            toNum(metric?.ebitdaTTM); // si Finnhub le fournit
+
+        if (ebitda == null && operatingIncome != null && depreciationAmortization != null) {
+            ebitda = operatingIncome + depreciationAmortization;
+        }
+
+        // Balance sheet
+        const totalDebt = getFromReport(report, ["bs"], [
+            "us-gaap_Debt",
+            "us-gaap_LongTermDebt",
+            "us-gaap_LongTermDebtNoncurrent",
+            "ifrs-full_Borrowings",
+        ]);
+
         const cashAndCashEquivalents = getFromReport(report, ["bs"], [
             "us-gaap_CashAndCashEquivalentsAtCarryingValue",
+            "us-gaap_CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
             "ifrs-full_CashAndCashEquivalents",
         ]);
-        const totalEquity = getFromReport(report, ["bs"], ["us-gaap_StockholdersEquity", "ifrs-full_Equity"]);
 
+        const totalEquity = getFromReport(report, ["bs"], [
+            "us-gaap_StockholdersEquity",
+            "ifrs-full_Equity",
+        ]);
+
+        // Cash flow
         const operatingCashFlow = getFromReport(report, ["cf"], [
             "us-gaap_NetCashProvidedByUsedInOperatingActivities",
             "ifrs-full_CashFlowsFromUsedInOperatingActivities",
         ]);
+
         const capitalExpenditure = getFromReport(report, ["cf"], [
             "us-gaap_PaymentsToAcquirePropertyPlantAndEquipment",
             "ifrs-full_PurchaseOfPropertyPlantAndEquipment",
@@ -198,12 +236,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
         const payload: ApiData = {
             symbol,
 
-            name: pickFirstString(profile?.name) ?? pickFirstString(profile?.companyName) ?? null,
-            sector: pickFirstString(profile?.finnhubIndustry) ?? null,
-            industry: pickFirstString(profile?.finnhubIndustry) ?? null,
-            country: pickFirstString(profile?.country) ?? null,
-            exchange: pickFirstString(profile?.exchange) ?? null,
-            description: pickFirstString(profile?.description) ?? null,
+            name: pickStr(profile?.name) ?? pickStr(profile?.companyName),
+            sector: pickStr(profile?.finnhubIndustry),
+            industry: pickStr(profile?.finnhubIndustry),
+            country: pickStr(profile?.country),
+            exchange: pickStr(profile?.exchange),
+            description: pickStr(profile?.description),
 
             price,
             marketCap,
@@ -213,7 +251,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
             yearLow,
             yearHigh,
 
-            period: pickFirstString(firstReport?.reportDate) ?? pickFirstString(firstReport?.filingDate) ?? null,
+            period,
             revenue,
             ebitda,
             operatingIncome,
@@ -238,14 +276,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
             netMargin,
         };
 
-        // Si vraiment rien
-        const hasUseful = payload.price != null || payload.name != null || payload.revenue != null;
-        if (!hasUseful) return res.status(404).json({ error: "No data found for this symbol" });
+        // au moins un minimum utile
+        const hasUseful = payload.price != null || payload.name != null || payload.revenue != null || payload.ebitda != null;
+        if (!hasUseful) return res.status(404).json({ error: "No data found for this symbol (Finnhub)" });
 
-        // ✅ cache pour réduire quota
         res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=3600");
         return res.status(200).json(payload);
-    } catch (e: any) {
+    } catch {
         return res.status(200).json({ error: "Erreur réseau serveur (Finnhub). Réessaie." });
     }
 }
