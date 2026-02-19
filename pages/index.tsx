@@ -83,6 +83,14 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function extractErrMessage(payload: any): string | null {
+  if (!payload) return null;
+  if (typeof payload === "string") return payload;
+  if (typeof payload?.error === "string") return payload.error;
+  if (typeof payload?.message === "string") return payload.message;
+  return null;
+}
+
 /* ------------------------ Notions ------------------------ */
 const DEFINITIONS: Record<
   string,
@@ -274,7 +282,7 @@ function scoreFromData(d: ApiData) {
   return { tone, verdict, reasonsGood, reasonsWatch, reasonsBad, netDebt, ndEbitda };
 }
 
-/* ------------------------ Helpers pour le bloc WOW ------------------------ */
+/* ------------------------ Helpers WOW ------------------------ */
 function toneFromPe(pe: number | null | undefined): Tone {
   if (!isNumber(pe)) return "orange";
   if (pe <= 15) return "green";
@@ -318,10 +326,8 @@ function scoreFromMetrics(d: ApiData, synth: ReturnType<typeof scoreFromData>) {
   const cash = score01FromTone(tCash);
   const qual = score01FromTone(tQual);
 
-  // pondération légère (risque un peu plus important)
   const total01 = clamp(0.26 * val + 0.30 * risk + 0.22 * cash + 0.22 * qual, 0, 1);
   const total = Math.round(total01 * 100);
-
   const tone: Tone = total >= 72 ? "green" : total >= 45 ? "orange" : "red";
 
   return {
@@ -347,7 +353,7 @@ function RingMeter({
   label,
   sub,
 }: {
-  value: number; // 0..100
+  value: number;
   tone: Tone;
   label: string;
   sub?: string;
@@ -376,9 +382,7 @@ function RingMeter({
           </filter>
         </defs>
 
-        {/* track */}
         <circle cx="60" cy="60" r={r} stroke="rgba(255,255,255,0.10)" strokeWidth="10" fill="none" />
-        {/* value glow */}
         <circle
           cx="60"
           cy="60"
@@ -392,7 +396,6 @@ function RingMeter({
           filter="url(#flSoftGlow)"
           style={{ opacity: 0.35 }}
         />
-        {/* value main */}
         <circle
           cx="60"
           cy="60"
@@ -456,17 +459,32 @@ function PillarBar({
 
 const LS_RECENTS = "mfl_recents_v1";
 
+/* ------------------------ Fetch helpers robustes ------------------------ */
+async function fetchJsonSafe(url: string) {
+  const r = await fetch(url);
+  const text = await r.text().catch(() => "");
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { ok: r.ok, status: r.status, json, text };
+}
+
 export default function Home() {
   const [symbol, setSymbol] = useState("AAPL");
   const [data, setData] = useState<ApiData | null>(null);
   const [loading, setLoading] = useState(false);
 
   const [openKey, setOpenKey] = useState<string | null>(null);
+
   const [news, setNews] = useState<NewsItem[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [newsError, setNewsError] = useState<string | null>(null);
 
   const [recents, setRecents] = useState<string[]>([]);
-  const [autoMode, setAutoMode] = useState(true); // auto-search soft (debounce)
+  const [autoMode, setAutoMode] = useState(true);
   const [lastFetchAt, setLastFetchAt] = useState<number | null>(null);
 
   const resultsRef = useRef<HTMLDivElement | null>(null);
@@ -474,7 +492,6 @@ export default function Home() {
 
   const canSearch = useMemo(() => symbol.trim().length >= 1, [symbol]);
 
-  // Load recents
   useEffect(() => {
     try {
       const raw = localStorage.getItem(LS_RECENTS);
@@ -497,7 +514,6 @@ export default function Home() {
     });
   };
 
-  // Keyboard shortcuts (Cmd/Ctrl+K focus, Esc close modal)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes("mac");
@@ -508,49 +524,75 @@ export default function Home() {
         inputRef.current?.focus();
         inputRef.current?.select();
       }
-
-      if (e.key === "Escape") {
-        setOpenKey(null);
-      }
+      if (e.key === "Escape") setOpenKey(null);
     };
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // ✅ scroll quand les résultats existent vraiment
+  useEffect(() => {
+    if (!data) return;
+    const t = setTimeout(() => {
+      resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+    return () => clearTimeout(t);
+  }, [data]);
+
   const fetchData = async (forcedSymbol?: string) => {
     const sym = (forcedSymbol ?? symbol).trim();
     if (!sym) return;
 
     setLoading(true);
-    setData(null);
+
+    // ⚠️ on ne wipe pas data immédiatement => UX plus clean
     setNews([]);
+    setNewsError(null);
     setNewsLoading(true);
 
+    saveRecent(sym);
+
+    // 1) Financials (must)
     try {
-      saveRecent(sym);
+      const r1 = await fetchJsonSafe(`/api/financials?symbol=${encodeURIComponent(sym)}`);
 
-      // 1) Financials
-      const res = await fetch(`/api/financials?symbol=${encodeURIComponent(sym)}`);
-      const json = (await res.json()) as ApiData;
-      setData(json);
+      if (!r1.ok) {
+        const msg = extractErrMessage(r1.json) ?? `Erreur API (${r1.status})`;
+        setData({ error: msg });
+        setLoading(false);
+        setNewsLoading(false);
+        setLastFetchAt(Date.now());
+        return;
+      }
 
-      // 2) News
-      const newsRes = await fetch(`/api/news?symbol=${encodeURIComponent(sym)}`);
-      const newsJson = await newsRes.json();
-      setNews(Array.isArray(newsJson.articles) ? newsJson.articles : []);
-      setNewsLoading(false);
-    } catch {
-      setData({ error: "Erreur réseau (impossible de joindre l’API)." });
-      setNews([]);
-    } finally {
+      setData(r1.json as ApiData);
+    } catch (e: any) {
+      setData({ error: `Erreur réseau sur /api/financials (${e?.message ?? "unknown"})` });
       setLoading(false);
       setNewsLoading(false);
       setLastFetchAt(Date.now());
+      return;
+    }
 
-      setTimeout(() => {
-        resultsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }, 80);
+    // 2) News (optional) — ✅ si ça plante, ça ne casse PLUS le dashboard
+    try {
+      const r2 = await fetchJsonSafe(`/api/news?symbol=${encodeURIComponent(sym)}`);
+      if (!r2.ok) {
+        setNews([]);
+        setNewsError(extractErrMessage(r2.json) ?? `Actus indisponibles (${r2.status})`);
+      } else {
+        const articles = Array.isArray(r2.json?.articles) ? r2.json.articles : [];
+        setNews(articles);
+        setNewsError(null);
+      }
+    } catch (e: any) {
+      setNews([]);
+      setNewsError(`Actus indisponibles (réseau)`);
+    } finally {
+      setNewsLoading(false);
+      setLoading(false);
+      setLastFetchAt(Date.now());
     }
   };
 
@@ -558,7 +600,6 @@ export default function Home() {
     if (e.key === "Enter") fetchData();
   };
 
-  // Auto-mode debounce (soft)
   useEffect(() => {
     if (!autoMode) return;
     const s = symbol.trim();
@@ -596,6 +637,7 @@ export default function Home() {
         @keyframes flFadeIn { from { opacity: 0; transform: translateY(3px);} to { opacity: 1; transform: translateY(0);} }
         @keyframes flFloat { 0% { transform: translateY(0);} 50% { transform: translateY(-3px);} 100% { transform: translateY(0);} }
         @keyframes flSheen { 0% { transform: translateX(-40%);} 100% { transform: translateX(140%);} }
+
         .fl-wow {
           position: relative;
           border-radius: 18px;
@@ -626,21 +668,20 @@ export default function Home() {
           pointer-events: none;
           opacity: 0.55;
         }
+
         .fl-wow-inner { position: relative; padding: 16px; display: grid; gap: 14px; }
-        .fl-wow-head {
-          display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
-        }
+        .fl-wow-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
         .fl-wow-title { font-weight: 950; letter-spacing: -0.2px; }
         .fl-wow-sub { opacity: 0.72; font-size: 12px; }
+
         .fl-wow-grid {
           display: grid;
           grid-template-columns: 220px 1fr;
           gap: 14px;
           align-items: stretch;
         }
-        @media (max-width: 860px) {
-          .fl-wow-grid { grid-template-columns: 1fr; }
-        }
+        @media (max-width: 860px) { .fl-wow-grid { grid-template-columns: 1fr; } }
+
         .fl-wow-ring {
           border-radius: 18px;
           border: 1px solid rgba(255,255,255,0.10);
@@ -653,6 +694,7 @@ export default function Home() {
         }
         .fl-wow-ring-label { margin-top: 6px; font-weight: 950; }
         .fl-wow-ring-sub { margin-top: 4px; font-size: 12px; opacity: 0.72; }
+
         .fl-wow-bars {
           border-radius: 18px;
           border: 1px solid rgba(255,255,255,0.10);
@@ -675,9 +717,8 @@ export default function Home() {
           transition: width 700ms ease;
           box-shadow: 0 10px 26px rgba(0,0,0,0.18);
         }
-        .fl-wow-mini {
-          display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
-        }
+
+        .fl-wow-mini { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
         .fl-wow-chip {
           padding: 8px 12px;
           border-radius: 999px;
@@ -725,15 +766,7 @@ export default function Home() {
 
         {/* Hero */}
         <div className="fl-hero fl-glass">
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              alignItems: "flex-start",
-              flexWrap: "wrap",
-            }}
-          >
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
             <div>
               <h1 className="fl-h1" style={{ marginBottom: 6 }}>
                 Recherche d’entreprise
@@ -796,7 +829,6 @@ export default function Home() {
             </button>
           </div>
 
-          {/* Quick picks */}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 14, alignItems: "center" }}>
             {["AAPL", "MSFT", "NVDA", "TSLA", "AIR.PA"].map((s) => (
               <button
@@ -851,7 +883,7 @@ export default function Home() {
         )}
 
         {/* Loading skeleton */}
-        {loading && (
+        {loading && !data && (
           <div className="fl-grid" ref={resultsRef}>
             {Array.from({ length: 6 }).map((_, i) => (
               <div key={i} className="fl-card">
@@ -875,7 +907,7 @@ export default function Home() {
         {/* Results */}
         {data && !data.error && synth && (
           <div className="fl-grid" ref={resultsRef} style={{ animation: "flFadeIn 200ms ease" as any }}>
-            {/* WOW PANEL (remplace le graphique) */}
+            {/* WOW */}
             {wow && (
               <div className="fl-card fl-wow" style={{ gridColumn: "span 12" }}>
                 <div className="fl-wow-inner">
@@ -895,14 +927,14 @@ export default function Home() {
                         <span style={{ fontWeight: 950 }}>{wow.total}/100</span>
                       </span>
 
-                      <span className="fl-wow-chip" title="Nombre d’actus chargées">
-                        <Dot tone={news.length > 0 ? "green" : "orange"} />
+                      <span className="fl-wow-chip" title="Actus (si l’API news est dispo)">
+                        <Dot tone={newsError ? "orange" : news.length > 0 ? "green" : "orange"} />
                         <span>Actus</span>
                         <span style={{ opacity: 0.75 }}>·</span>
-                        <span style={{ fontWeight: 950 }}>{newsLoading ? "…" : news.length}</span>
+                        <span style={{ fontWeight: 950 }}>{newsLoading ? "…" : newsError ? "—" : news.length}</span>
                       </span>
 
-                      <span className="fl-wow-chip" title="Verdict automatique (règles simples)">
+                      <span className="fl-wow-chip" title="Verdict automatique">
                         <Dot tone={synth.tone} />
                         <span>{synth.verdict}</span>
                       </span>
@@ -919,13 +951,7 @@ export default function Home() {
 
                     <div className="fl-wow-bars">
                       {wow.pillars.map((p) => (
-                        <PillarBar
-                          key={p.k}
-                          title={p.k}
-                          value01={p.value01}
-                          tone={p.tone}
-                          hint={p.hint}
-                        />
+                        <PillarBar key={p.k} title={p.k} value01={p.value01} tone={p.tone} hint={p.hint} />
                       ))}
 
                       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 2 }}>
@@ -940,9 +966,7 @@ export default function Home() {
                           <Dot tone={toneFromNdEbitda(synth.ndEbitda)} />
                           <span>DN/EBITDA</span>
                           <span style={{ opacity: 0.75 }}>·</span>
-                          <span style={{ fontWeight: 950 }}>
-                            {synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
-                          </span>
+                          <span style={{ fontWeight: 950 }}>{synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}</span>
                         </span>
 
                         <span className="fl-wow-chip" title="Free Cash Flow">
@@ -959,6 +983,12 @@ export default function Home() {
                           <span style={{ fontWeight: 950 }}>{fmtSignedPct(data.netMargin)}</span>
                         </span>
                       </div>
+
+                      {newsError && (
+                        <div style={{ marginTop: 8, fontSize: 12, opacity: 0.70 }}>
+                          ⚠️ Actus indisponibles : {newsError}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -967,10 +997,7 @@ export default function Home() {
 
             {/* SYNTHÈSE */}
             <div className="fl-card" style={{ gridColumn: "span 12" }}>
-              <div
-                className="fl-card-header"
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}
-              >
+              <div className="fl-card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <div className="fl-card-title">Synthèse (automatique)</div>
                 <div className="fl-pill">
                   <Dot tone={synth.tone} />
@@ -1032,16 +1059,8 @@ export default function Home() {
                 <Field label="Prix" value={fmtNumber(data.price)} sub="Dernier cours" />
                 <Field label="Capitalisation" value={fmtMoneyCompact(data.marketCap)} sub="Market Cap" />
                 <Field label="Volume" value={fmtNumber(data.volume)} sub="Volume du jour" />
-                <Field
-                  label="Jour"
-                  value={`${fmtNumber(data.dayLow)} → ${fmtNumber(data.dayHigh)}`}
-                  sub="Plus bas → Plus haut"
-                />
-                <Field
-                  label="52 semaines"
-                  value={`${fmtNumber(data.yearLow)} → ${fmtNumber(data.yearHigh)}`}
-                  sub="Plus bas → Plus haut"
-                />
+                <Field label="Jour" value={`${fmtNumber(data.dayLow)} → ${fmtNumber(data.dayHigh)}`} sub="Plus bas → Plus haut" />
+                <Field label="52 semaines" value={`${fmtNumber(data.yearLow)} → ${fmtNumber(data.yearHigh)}`} sub="Plus bas → Plus haut" />
               </div>
             </Card>
 
@@ -1051,10 +1070,7 @@ export default function Home() {
                 <Field label="Période" value={data.period ?? "—"} sub="Dernière période connue" />
                 <Field label={<InfoTip k="revenue" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.revenue)} />
                 <Field label={<InfoTip k="ebitda" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.ebitda)} />
-                <Field
-                  label={<InfoTip k="operatingIncome" onOpen={setOpenKey} />}
-                  value={fmtMoneyCompact(data.operatingIncome)}
-                />
+                <Field label={<InfoTip k="operatingIncome" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.operatingIncome)} />
                 <Field label={<InfoTip k="netIncome" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.netIncome)} />
               </div>
             </Card>
@@ -1063,10 +1079,7 @@ export default function Home() {
             <Card title="Bilan">
               <div className="fl-fields">
                 <Field label={<InfoTip k="totalDebt" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.totalDebt)} />
-                <Field
-                  label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />}
-                  value={fmtMoneyCompact(data.cashAndCashEquivalents)}
-                />
+                <Field label={<InfoTip k="cashAndCashEquivalents" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.cashAndCashEquivalents)} />
                 <Field label="Capitaux propres" value={fmtMoneyCompact(data.totalEquity)} />
                 <Field label="Dette nette" value={fmtMoneyCompact(synth.netDebt)} sub="Dette - Cash" />
               </div>
@@ -1077,16 +1090,8 @@ export default function Home() {
               <div className="fl-fields">
                 <Field label="Operating CF" value={fmtMoneyCompact(data.operatingCashFlow)} sub="Flux opérationnel" />
                 <Field label="Capex" value={fmtMoneyCompact(data.capitalExpenditure)} sub="Investissements" />
-                <Field
-                  label={<InfoTip k="freeCashFlow" onOpen={setOpenKey} />}
-                  value={fmtMoneyCompact(data.freeCashFlow)}
-                  sub="OCF - Capex"
-                />
-                <Field
-                  label="Dette nette / EBITDA"
-                  value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)}
-                  sub="Niveau de risque"
-                />
+                <Field label={<InfoTip k="freeCashFlow" onOpen={setOpenKey} />} value={fmtMoneyCompact(data.freeCashFlow)} sub="OCF - Capex" />
+                <Field label="Dette nette / EBITDA" value={synth.ndEbitda == null ? "—" : synth.ndEbitda.toFixed(2)} sub="Niveau de risque" />
               </div>
             </Card>
 
@@ -1101,9 +1106,14 @@ export default function Home() {
                   </>
                 )}
 
-                {!newsLoading && news.length === 0 && <div style={{ opacity: 0.65 }}>Aucune actualité trouvée.</div>}
+                {!newsLoading && (newsError || news.length === 0) && (
+                  <div style={{ opacity: 0.65 }}>
+                    {newsError ? `Actus indisponibles : ${newsError}` : "Aucune actualité trouvée."}
+                  </div>
+                )}
 
                 {!newsLoading &&
+                  !newsError &&
                   news.map((n, i) => (
                     <a
                       key={i}
@@ -1111,15 +1121,9 @@ export default function Home() {
                       target="_blank"
                       rel="noreferrer"
                       className="fl-news"
-                      style={{
-                        transition: "transform 170ms ease, box-shadow 170ms ease, border-color 170ms ease",
-                      }}
-                      onMouseEnter={(e) => {
-                        (e.currentTarget as any).style.transform = "translateY(-2px)";
-                      }}
-                      onMouseLeave={(e) => {
-                        (e.currentTarget as any).style.transform = "translateY(0)";
-                      }}
+                      style={{ transition: "transform 170ms ease, box-shadow 170ms ease, border-color 170ms ease" }}
+                      onMouseEnter={(e) => ((e.currentTarget as any).style.transform = "translateY(-2px)")}
+                      onMouseLeave={(e) => ((e.currentTarget as any).style.transform = "translateY(0)")}
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                         <div className="fl-news-title">{n.title}</div>
@@ -1143,11 +1147,7 @@ export default function Home() {
               data.roa != null) && (
                 <Card title="Ratios (si disponibles)">
                   <div className="fl-fields">
-                    <Field
-                      label="PER (P/E)"
-                      value={data.pe != null ? String((data.pe as any).toFixed?.(2) ?? data.pe) : "—"}
-                      sub="Valorisation"
-                    />
+                    <Field label="PER (P/E)" value={data.pe != null ? String((data.pe as any).toFixed?.(2) ?? data.pe) : "—"} sub="Valorisation" />
                     <Field label="EPS" value={data.eps != null ? String(data.eps) : "—"} sub="Bénéfice par action" />
                     <Field label="P/B" value={data.pb != null ? String(data.pb) : "—"} />
                     <Field label="P/S" value={data.ps != null ? String(data.ps) : "—"} />
@@ -1195,13 +1195,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* Footer */}
         <div className="fl-footer">
           <div>MyFinanceLab · Dashboard</div>
           <div style={{ opacity: 0.7 }}>Notes : pense-bête perso</div>
         </div>
 
-        {/* Modal définitions */}
         {openKey && DEFINITIONS[openKey] && (
           <div className="fl-overlay" onClick={() => setOpenKey(null)} style={{ animation: "flFadeIn 140ms ease" as any }}>
             <div className="fl-modal" onClick={(e) => e.stopPropagation()}>
