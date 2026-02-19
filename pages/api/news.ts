@@ -1,62 +1,93 @@
 import type { NextApiRequest, NextApiResponse } from "next";
 
-type Article = { title: string; url: string; site: string; date: string };
+type Article = {
+    title: string;
+    url: string;
+    site: string;
+    date: string;
+};
 
-async function tryJson(url: string) {
-    const r = await fetch(url);
-    if (!r.ok) return null;
+async function safeFetchJson(url: string) {
     try {
+        const r = await fetch(url, {
+            headers: { Accept: "application/json" },
+        });
+
+        if (!r.ok) {
+            console.log("News API error:", r.status);
+            return null;
+        }
+
         return await r.json();
-    } catch {
+    } catch (e) {
+        console.log("News fetch failed:", e);
         return null;
     }
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+export default async function handler(
+    req: NextApiRequest,
+    res: NextApiResponse
+) {
     const symbol = String(req.query.symbol || "").trim();
-    if (!symbol) return res.status(400).json({ error: "Symbol missing" });
+
+    if (!symbol) {
+        return res.status(200).json({ articles: [] });
+    }
 
     const apiKey = process.env.FMP_API_KEY;
 
-    // 1) Tentative FMP (si tu as accès)
+    /* ================================
+       1️⃣ Tentative FMP (si clé valide)
+    =================================== */
+
     if (apiKey) {
-        const fmpUrl = `https://financialmodelingprep.com/api/v3/stock_news?tickers=${encodeURIComponent(
+        const fmpUrl = `https://financialmodelingprep.com/stable/news?tickers=${encodeURIComponent(
             symbol
         )}&limit=10&apikey=${encodeURIComponent(apiKey)}`;
 
-        const fmpData = await tryJson(fmpUrl);
+        const fmpData = await safeFetchJson(fmpUrl);
 
-        const fmpArticles: Article[] = Array.isArray(fmpData)
-            ? fmpData.map((a: any) => ({
-                title: a.title,
-                url: a.url,
+        if (Array.isArray(fmpData) && fmpData.length > 0) {
+            const articles: Article[] = fmpData.map((a: any) => ({
+                title: a.title ?? "Sans titre",
+                url: a.url ?? "#",
                 site: a.site ?? "FMP",
                 date: a.publishedDate ?? new Date().toISOString(),
-            }))
-            : [];
+            }));
 
-        // si FMP renvoie quelque chose, on retourne ça
-        if (fmpArticles.length > 0) {
-            return res.status(200).json({ source: "FMP", articles: fmpArticles });
+            return res.status(200).json({ articles });
         }
     }
 
-    // 2) Fallback GRATUIT (pas de clé) : GDELT
-    // On cherche des news liées au symbole (ex: TSLA / AAPL)
+    /* ================================
+       2️⃣ Fallback gratuit (GDELT)
+    =================================== */
+
     const gdeltUrl =
-        `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(symbol)}` +
-        `&mode=artlist&format=json&maxrecords=10&sort=datedesc`;
+        `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(
+            symbol
+        )}&mode=artlist&format=json&maxrecords=10&sort=datedesc`;
 
-    const gdeltData = await tryJson(gdeltUrl);
+    const gdeltData = await safeFetchJson(gdeltUrl);
 
-    const gdeltArticles: Article[] = Array.isArray(gdeltData?.articles)
-        ? gdeltData.articles.map((a: any) => ({
-            title: a.title,
-            url: a.url,
-            site: a.sourceCountry ?? a.sourceCollectionIdentifier ?? "GDELT",
-            date: a.seendate ?? a.date ?? new Date().toISOString(),
-        }))
-        : [];
+    if (gdeltData?.articles && Array.isArray(gdeltData.articles)) {
+        const articles: Article[] = gdeltData.articles.map((a: any) => ({
+            title: a.title ?? "Sans titre",
+            url: a.url ?? "#",
+            site:
+                a.sourceCountry ??
+                a.sourceCollectionIdentifier ??
+                "GDELT",
+            date: a.seendate ?? new Date().toISOString(),
+        }));
 
-    return res.status(200).json({ source: "GDELT", articles: gdeltArticles });
+        return res.status(200).json({ articles });
+    }
+
+    /* ================================
+       3️⃣ Rien trouvé → retourne vide
+    =================================== */
+
+    return res.status(200).json({ articles: [] });
 }
