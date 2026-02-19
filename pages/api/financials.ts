@@ -1,138 +1,251 @@
+// pages/api/financials.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
-async function safeJson(url: string) {
+type ApiData = {
+    error?: string;
+
+    symbol?: string;
+    name?: string;
+    exchange?: string;
+    sector?: string;
+    industry?: string;
+    country?: string;
+    description?: string;
+
+    price?: number | null;
+    marketCap?: number | null;
+    volume?: number | null;
+    dayLow?: number | null;
+    dayHigh?: number | null;
+    yearLow?: number | null;
+    yearHigh?: number | null;
+
+    period?: string | null;
+    revenue?: number | null;
+    ebitda?: number | null;
+    operatingIncome?: number | null;
+    netIncome?: number | null;
+
+    totalDebt?: number | null;
+    cashAndCashEquivalents?: number | null;
+    totalEquity?: number | null;
+
+    operatingCashFlow?: number | null;
+    capitalExpenditure?: number | null;
+    freeCashFlow?: number | null;
+
+    pe?: number | null;
+    eps?: number | null;
+    pb?: number | null;
+    ps?: number | null;
+    roe?: number | null;
+    roa?: number | null;
+    grossMargin?: number | null;
+    operatingMargin?: number | null;
+    netMargin?: number | null;
+};
+
+function toNum(x: any): number | null {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+}
+function pickFirstString(x: any): string | null {
+    return typeof x === "string" && x.trim() ? x.trim() : null;
+}
+
+function extractErrMessage(payload: any): string | null {
+    if (!payload) return null;
+    if (typeof payload === "string") return payload;
+    if (typeof payload?.error === "string") return payload.error;
+    if (typeof payload?.message === "string") return payload.message;
+    return null;
+}
+
+async function fetchJson(url: string) {
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    const text = await r.text().catch(() => "");
+    let json: any = null;
     try {
-        const r = await fetch(url);
-
-        if (r.status === 429) {
-            return { __error: "quota" };
-        }
-
-        if (!r.ok) {
-            return null;
-        }
-
-        return await r.json();
+        json = text ? JSON.parse(text) : null;
     } catch {
-        return null;
+        json = null;
     }
+    return { ok: r.ok, status: r.status, json, text };
 }
 
-function first(arr: any) {
-    return Array.isArray(arr) && arr.length ? arr[0] : null;
+// Finnhub financials-reported: report.ic / report.bs / report.cf
+function getFromReport(report: any, blocks: ("ic" | "bs" | "cf")[], concepts: string[]): number | null {
+    if (!report) return null;
+    for (const b of blocks) {
+        const arr = report?.[b];
+        if (!Array.isArray(arr)) continue;
+        for (const c of concepts) {
+            const row = arr.find((x: any) => x?.concept === c);
+            const v = row?.value;
+            const n = toNum(v);
+            if (n != null) return n;
+        }
+    }
+    return null;
 }
 
-export default async function handler(req: NextApiRequest, res: NextApiResponse) {
-    const symbol = String(req.query.symbol || "").trim().toUpperCase();
-    if (!symbol) return res.status(400).json({ error: "Symbol is required" });
+export default async function handler(req: NextApiRequest, res: NextApiResponse<ApiData>) {
+    if (req.method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return res.status(405).json({ error: "Method Not Allowed" });
+    }
 
-    const apiKey = process.env.FMP_API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Missing FMP_API_KEY" });
+    const symbol = String(req.query.symbol ?? "").trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ error: "Missing symbol" });
 
-    const base = "https://financialmodelingprep.com/stable";
-    const q = (path: string) =>
-        `${base}/${path}${path.includes("?") ? "&" : "?"}apikey=${encodeURIComponent(apiKey)}`;
+    const apiKey = process.env.FINNHUB_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Missing FINNHUB_API_KEY (Vercel env var)" });
+
+    const base = "https://finnhub.io/api/v1";
+    const q = (path: string) => `${base}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(apiKey)}`;
 
     try {
-        // On lance tout en parallèle pour aller plus vite
-        const [
-            quoteArr,
-            profileArr,
-            ratiosArr,
-            metricsArr,
-            incomeArr,
-            balanceArr,
-            cashArr
-        ] = await Promise.all([
-            safeJson(q(`quote?symbol=${symbol}`)),
-            safeJson(q(`profile?symbol=${symbol}`)),
-            safeJson(q(`ratios?symbol=${symbol}`)),
-            safeJson(q(`key-metrics?symbol=${symbol}`)),
-            safeJson(q(`income-statement?symbol=${symbol}`)),
-            safeJson(q(`balance-sheet-statement?symbol=${symbol}`)),
-            safeJson(q(`cash-flow-statement?symbol=${symbol}`)),
+        // ✅ Appels
+        const [quoteR, profR, metR, finR] = await Promise.all([
+            fetchJson(q(`/quote?symbol=${encodeURIComponent(symbol)}`)),
+            fetchJson(q(`/stock/profile2?symbol=${encodeURIComponent(symbol)}`)),
+            fetchJson(q(`/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all`)),
+            fetchJson(q(`/stock/financials-reported?symbol=${encodeURIComponent(symbol)}&freq=annual`)),
         ]);
 
-        // Gestion quota propre
-        if (
-            quoteArr?.__error === "quota" ||
-            profileArr?.__error === "quota"
-        ) {
-            return res.status(429).json({
-                error: "429 quota",
-                message: "Limite API atteinte. Attends le reset FMP."
-            });
+        // ✅ Gestion erreurs quota / token invalide
+        const errMsg =
+            extractErrMessage(quoteR.json) ||
+            extractErrMessage(profR.json) ||
+            extractErrMessage(metR.json) ||
+            extractErrMessage(finR.json);
+
+        const any429 = [quoteR, profR, metR, finR].some((x) => x.status === 429);
+        if (any429) {
+            res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=120");
+            return res.status(200).json({ error: "Quota Finnhub atteint (429). Attends 1 minute et réessaie." });
         }
 
-        const quote = first(quoteArr);
-        const profile = first(profileArr);
-        const ratios = first(ratiosArr);
-        const metrics = first(metricsArr);
-        const income = first(incomeArr);
-        const balance = first(balanceArr);
-        const cash = first(cashArr);
-
-        if (!quote && !profile) {
-            return res.status(404).json({ error: "No data found" });
+        // Si Finnhub renvoie une erreur texte même avec status 200 parfois
+        if (errMsg && /limit|quota|rate|token|api key/i.test(errMsg)) {
+            res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=120");
+            return res.status(200).json({ error: `Erreur Finnhub: ${errMsg}` });
         }
+
+        const quote = quoteR.ok ? quoteR.json : null;
+        const profile = profR.ok ? profR.json : null;
+        const metric = metR.ok ? metR.json?.metric : null;
+
+        const firstReport =
+            Array.isArray(finR.json?.data) && finR.json.data.length ? finR.json.data[0] : null;
+        const report = firstReport?.report ?? null;
+
+        // Market
+        const price = toNum(quote?.c);
+        const dayHigh = toNum(quote?.h);
+        const dayLow = toNum(quote?.l);
+        const volume = toNum(quote?.v);
+
+        const yearHigh = toNum(metric?.["52WeekHigh"]);
+        const yearLow = toNum(metric?.["52WeekLow"]);
+
+        // Ratios / metrics (TTM)
+        const pe = toNum(metric?.peTTM);
+        const pb = toNum(metric?.pb);
+        const ps = toNum(metric?.psTTM);
+        const eps = toNum(metric?.epsTTM);
+        const roe = toNum(metric?.roeTTM);
+        const roa = toNum(metric?.roaTTM);
+        const grossMargin = toNum(metric?.grossMarginTTM);
+        const operatingMargin = toNum(metric?.operatingMarginTTM);
+        const netMargin = toNum(metric?.netMarginTTM);
+
+        // Financials (annual latest)
+        const revenue = getFromReport(report, ["ic"], ["us-gaap_Revenues", "ifrs-full_Revenue"]);
+        const ebitda = getFromReport(report, ["ic"], [
+            "us-gaap_EarningsBeforeInterestTaxesDepreciationAmortization",
+            "ifrs-full_EBITDA",
+        ]);
+        const operatingIncome = getFromReport(report, ["ic"], ["us-gaap_OperatingIncomeLoss", "ifrs-full_OperatingProfitLoss"]);
+        const netIncome = getFromReport(report, ["ic"], ["us-gaap_NetIncomeLoss", "ifrs-full_ProfitLoss"]);
+
+        const totalDebt = getFromReport(report, ["bs"], ["us-gaap_Debt", "us-gaap_LongTermDebt", "ifrs-full_Borrowings"]);
+        const cashAndCashEquivalents = getFromReport(report, ["bs"], [
+            "us-gaap_CashAndCashEquivalentsAtCarryingValue",
+            "ifrs-full_CashAndCashEquivalents",
+        ]);
+        const totalEquity = getFromReport(report, ["bs"], ["us-gaap_StockholdersEquity", "ifrs-full_Equity"]);
+
+        const operatingCashFlow = getFromReport(report, ["cf"], [
+            "us-gaap_NetCashProvidedByUsedInOperatingActivities",
+            "ifrs-full_CashFlowsFromUsedInOperatingActivities",
+        ]);
+        const capitalExpenditure = getFromReport(report, ["cf"], [
+            "us-gaap_PaymentsToAcquirePropertyPlantAndEquipment",
+            "ifrs-full_PurchaseOfPropertyPlantAndEquipment",
+        ]);
 
         const freeCashFlow =
-            cash?.freeCashFlow ??
-            (typeof cash?.operatingCashFlow === "number" &&
-                typeof cash?.capitalExpenditure === "number"
-                ? cash.operatingCashFlow - Math.abs(cash.capitalExpenditure)
-                : null);
+            operatingCashFlow != null && capitalExpenditure != null
+                ? operatingCashFlow - Math.abs(capitalExpenditure)
+                : null;
 
-        return res.status(200).json({
+        const marketCap =
+            toNum(profile?.marketCapitalization) != null
+                ? Math.round(Number(profile.marketCapitalization) * 1e6) // Finnhub = millions
+                : null;
+
+        const payload: ApiData = {
             symbol,
 
-            // Identité
-            name: profile?.companyName ?? quote?.name ?? null,
-            sector: profile?.sector ?? null,
-            industry: profile?.industry ?? null,
-            country: profile?.country ?? null,
-            exchange: quote?.exchange ?? null,
-            description: profile?.description ?? null,
+            name: pickFirstString(profile?.name) ?? pickFirstString(profile?.companyName) ?? null,
+            sector: pickFirstString(profile?.finnhubIndustry) ?? null,
+            industry: pickFirstString(profile?.finnhubIndustry) ?? null,
+            country: pickFirstString(profile?.country) ?? null,
+            exchange: pickFirstString(profile?.exchange) ?? null,
+            description: pickFirstString(profile?.description) ?? null,
 
-            // Marché
-            price: quote?.price ?? null,
-            marketCap: quote?.marketCap ?? null,
-            volume: quote?.volume ?? null,
-            dayLow: quote?.dayLow ?? null,
-            dayHigh: quote?.dayHigh ?? null,
-            yearLow: quote?.yearLow ?? null,
-            yearHigh: quote?.yearHigh ?? null,
+            price,
+            marketCap,
+            volume,
+            dayLow,
+            dayHigh,
+            yearLow,
+            yearHigh,
 
-            // Ratios
-            pe: quote?.pe ?? ratios?.priceEarningsRatio ?? null,
-            eps: quote?.eps ?? null,
-            pb: ratios?.priceToBookRatio ?? null,
-            ps: ratios?.priceToSalesRatio ?? null,
-            roe: ratios?.returnOnEquity ?? metrics?.roe ?? null,
-            roa: ratios?.returnOnAssets ?? metrics?.roa ?? null,
-            netMargin: ratios?.netProfitMargin ?? metrics?.netProfitMargin ?? null,
-            operatingMargin: metrics?.operatingProfitMargin ?? null,
-            grossMargin: metrics?.grossProfitMargin ?? null,
+            period: pickFirstString(firstReport?.reportDate) ?? pickFirstString(firstReport?.filingDate) ?? null,
+            revenue,
+            ebitda,
+            operatingIncome,
+            netIncome,
 
-            // Résultats
-            period: income?.date ?? null,
-            revenue: income?.revenue ?? null,
-            ebitda: income?.ebitda ?? null,
-            operatingIncome: income?.operatingIncome ?? null,
-            netIncome: income?.netIncome ?? null,
+            totalDebt,
+            cashAndCashEquivalents,
+            totalEquity,
 
-            // Bilan
-            totalDebt: balance?.totalDebt ?? null,
-            cashAndCashEquivalents: balance?.cashAndCashEquivalents ?? null,
-            totalEquity: balance?.totalStockholdersEquity ?? null,
-
-            // Cash flow
-            operatingCashFlow: cash?.operatingCashFlow ?? null,
-            capitalExpenditure: cash?.capitalExpenditure ?? null,
+            operatingCashFlow,
+            capitalExpenditure,
             freeCashFlow,
-        });
 
-    } catch (e) {
-        return res.status(500).json({ error: "Server error" });
+            pe,
+            eps,
+            pb,
+            ps,
+            roe,
+            roa,
+            grossMargin,
+            operatingMargin,
+            netMargin,
+        };
+
+        // Si vraiment rien
+        const hasUseful = payload.price != null || payload.name != null || payload.revenue != null;
+        if (!hasUseful) return res.status(404).json({ error: "No data found for this symbol" });
+
+        // ✅ cache pour réduire quota
+        res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=3600");
+        return res.status(200).json(payload);
+    } catch (e: any) {
+        return res.status(200).json({ error: "Erreur réseau serveur (Finnhub). Réessaie." });
     }
 }

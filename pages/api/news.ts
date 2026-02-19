@@ -1,93 +1,83 @@
+// pages/api/news.ts
 import type { NextApiRequest, NextApiResponse } from "next";
 
-type Article = {
-    title: string;
-    url: string;
-    site: string;
-    date: string;
-};
+type Article = { title: string; url: string; site: string; date: string };
 
-async function safeFetchJson(url: string) {
-    try {
-        const r = await fetch(url, {
-            headers: { Accept: "application/json" },
-        });
-
-        if (!r.ok) {
-            console.log("News API error:", r.status);
-            return null;
-        }
-
-        return await r.json();
-    } catch (e) {
-        console.log("News fetch failed:", e);
-        return null;
-    }
+function isoDate(d: Date) {
+    // YYYY-MM-DD
+    return d.toISOString().slice(0, 10);
 }
 
-export default async function handler(
-    req: NextApiRequest,
-    res: NextApiResponse
-) {
-    const symbol = String(req.query.symbol || "").trim();
+async function fetchJson(url: string) {
+    const r = await fetch(url, { headers: { Accept: "application/json" } });
+    const text = await r.text().catch(() => "");
+    let json: any = null;
+    try {
+        json = text ? JSON.parse(text) : null;
+    } catch {
+        json = null;
+    }
+    return { ok: r.ok, status: r.status, json, text };
+}
 
-    if (!symbol) {
-        return res.status(200).json({ articles: [] });
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+    if (req.method !== "GET") {
+        res.setHeader("Allow", "GET");
+        return res.status(405).json({ error: "Method Not Allowed" });
     }
 
-    const apiKey = process.env.FMP_API_KEY;
+    const symbol = String(req.query.symbol ?? "").trim().toUpperCase();
+    if (!symbol) return res.status(400).json({ error: "Symbol missing" });
 
-    /* ================================
-       1️⃣ Tentative FMP (si clé valide)
-    =================================== */
+    const apiKey = process.env.FINNHUB_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Missing FINNHUB_API_KEY" });
 
-    if (apiKey) {
-        const fmpUrl = `https://financialmodelingprep.com/stable/news?tickers=${encodeURIComponent(
-            symbol
-        )}&limit=10&apikey=${encodeURIComponent(apiKey)}`;
+    // Finnhub: company-news nécessite from/to (YYYY-MM-DD)
+    const to = new Date();
+    const from = new Date();
+    from.setDate(to.getDate() - 14); // 14 derniers jours
 
-        const fmpData = await safeFetchJson(fmpUrl);
+    const base = "https://finnhub.io/api/v1";
+    const url =
+        `${base}/company-news?symbol=${encodeURIComponent(symbol)}` +
+        `&from=${encodeURIComponent(isoDate(from))}` +
+        `&to=${encodeURIComponent(isoDate(to))}` +
+        `&token=${encodeURIComponent(apiKey)}`;
 
-        if (Array.isArray(fmpData) && fmpData.length > 0) {
-            const articles: Article[] = fmpData.map((a: any) => ({
-                title: a.title ?? "Sans titre",
-                url: a.url ?? "#",
-                site: a.site ?? "FMP",
-                date: a.publishedDate ?? new Date().toISOString(),
+    try {
+        const r = await fetchJson(url);
+
+        // Si quota / token invalide / erreur API => on renvoie 200 avec articles=[] (comme ça ton dashboard ne casse pas)
+        if (!r.ok) {
+            res.setHeader("Cache-Control", "s-maxage=120, stale-while-revalidate=600");
+            return res.status(200).json({
+                source: "FINNHUB",
+                articles: [] as Article[],
+                error: `Finnhub news error (${r.status})`,
+            });
+        }
+
+        const raw = Array.isArray(r.json) ? r.json : [];
+
+        const articles: Article[] = raw
+            .filter((a: any) => a?.headline && a?.url)
+            .slice(0, 12)
+            .map((a: any) => ({
+                title: String(a.headline),
+                url: String(a.url),
+                site: a.source ? String(a.source) : "Finnhub",
+                date: a.datetime ? new Date(Number(a.datetime) * 1000).toISOString() : new Date().toISOString(),
             }));
 
-            return res.status(200).json({ articles });
-        }
+        res.setHeader("Cache-Control", "s-maxage=300, stale-while-revalidate=3600");
+        return res.status(200).json({ source: "FINNHUB", articles });
+    } catch {
+        // Réseau / timeout => pareil: on ne casse pas l’UI
+        res.setHeader("Cache-Control", "s-maxage=60, stale-while-revalidate=300");
+        return res.status(200).json({
+            source: "FINNHUB",
+            articles: [] as Article[],
+            error: "Network error while fetching Finnhub news",
+        });
     }
-
-    /* ================================
-       2️⃣ Fallback gratuit (GDELT)
-    =================================== */
-
-    const gdeltUrl =
-        `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(
-            symbol
-        )}&mode=artlist&format=json&maxrecords=10&sort=datedesc`;
-
-    const gdeltData = await safeFetchJson(gdeltUrl);
-
-    if (gdeltData?.articles && Array.isArray(gdeltData.articles)) {
-        const articles: Article[] = gdeltData.articles.map((a: any) => ({
-            title: a.title ?? "Sans titre",
-            url: a.url ?? "#",
-            site:
-                a.sourceCountry ??
-                a.sourceCollectionIdentifier ??
-                "GDELT",
-            date: a.seendate ?? new Date().toISOString(),
-        }));
-
-        return res.status(200).json({ articles });
-    }
-
-    /* ================================
-       3️⃣ Rien trouvé → retourne vide
-    =================================== */
-
-    return res.status(200).json({ articles: [] });
 }
